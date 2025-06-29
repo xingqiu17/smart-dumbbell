@@ -9,6 +9,7 @@
 #include "system_info.h"
 
 #define TAG "main"
+extern "C" void MotionTask(void*);   // 提前声明
 
 extern "C" void app_main(void)
 {
@@ -26,4 +27,15 @@ extern "C" void app_main(void)
 
     // Launch the application
     Application::GetInstance().Start();
+
+    // 启动运动采样任务，固定到 core1，优先级2，2KB栈
+    xTaskCreatePinnedToCore(
+        MotionTask,           // 任务函数
+        "motion",             // 任务名
+        2048,                 // 栈空间
+        nullptr,              // 参数
+        2,                    // 优先级
+        nullptr,              // 不关心task handle
+        1                     // core1（单核可填 tskNO_AFFINITY）
+    );
 }

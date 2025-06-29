@@ -1,29 +1,32 @@
-set(SOURCES "audio_codecs/audio_codec.cc"
-            "audio_codecs/no_audio_codec.cc"
-            "audio_codecs/box_audio_codec.cc"
-            "audio_codecs/es8311_audio_codec.cc"
-            "audio_codecs/es8374_audio_codec.cc"
-            "audio_codecs/es8388_audio_codec.cc"
-            "audio_processing/audio_debugger.cc"
-            "led/single_led.cc"
-            "led/circular_strip.cc"
-            "led/gpio_led.cc"
-            "display/display.cc"
-            "display/lcd_display.cc"
-            "display/oled_display.cc"
-            "protocols/protocol.cc"
-            "protocols/mqtt_protocol.cc"
-            "protocols/websocket_protocol.cc"
-            "iot/thing.cc"
-            "iot/thing_manager.cc"
-            "mcp_server.cc"
-            "system_info.cc"
-            "application.cc"
-            "ota.cc"
-            "settings.cc"
-            "background_task.cc"
-            "main.cc"
-            )
+# main/CMakeLists.txt
+
+set(SOURCES 
+    "audio_codecs/audio_codec.cc"
+    "audio_codecs/no_audio_codec.cc"
+    "audio_codecs/box_audio_codec.cc"
+    "audio_codecs/es8311_audio_codec.cc"
+    "audio_codecs/es8374_audio_codec.cc"
+    "audio_codecs/es8388_audio_codec.cc"
+    "audio_processing/audio_debugger.cc"
+    "led/single_led.cc"
+    "led/circular_strip.cc"
+    "led/gpio_led.cc"
+    "display/display.cc"
+    "display/lcd_display.cc"
+    "display/oled_display.cc"
+    "protocols/protocol.cc"
+    "protocols/mqtt_protocol.cc"
+    "protocols/websocket_protocol.cc"
+    "iot/thing.cc"
+    "iot/thing_manager.cc"
+    "mcp_server.cc"
+    "system_info.cc"
+    "application.cc"
+    "ota.cc"
+    "settings.cc"
+    "background_task.cc"
+    "main.cc"
+)
 
 set(INCLUDE_DIRS "." "display" "audio_codecs" "protocols" "audio_processing")
 
@@ -35,6 +38,28 @@ list(APPEND SOURCES ${IOT_SOURCES})
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
 list(APPEND SOURCES ${BOARD_COMMON_SOURCES})
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
+
+# ----------- BOSCH BMI270/BMM150 驱动 相关文件 -----------
+# Bosch 官方C源码和头文件统一放 peripherals/bosch 目录下
+file(GLOB BOSCH_BMI_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/peripherals/bosch/bmi2.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/peripherals/bosch/bmi270.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/peripherals/bosch/bmm150.c
+)
+# C++ 封装 + I2C 适配层
+list(APPEND SOURCES
+    peripherals/bosch_i2c_adapter.cc
+    peripherals/bmi270_sensor.cc
+    peripherals/bmm150_sensor.cc
+    motion_task.cc
+    ${BOSCH_BMI_SOURCES}
+)
+# 添加头文件搜索路径
+list(APPEND INCLUDE_DIRS
+    ${CMAKE_CURRENT_SOURCE_DIR}/peripherals
+    ${CMAKE_CURRENT_SOURCE_DIR}/peripherals/bosch
+)
+# ------------------------------------------------------------
 
 # 根据 BOARD_TYPE 配置添加对应的板级文件
 if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)

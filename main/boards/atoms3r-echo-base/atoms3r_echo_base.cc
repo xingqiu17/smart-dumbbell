@@ -15,6 +15,10 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_gc9a01.h>
 
+#include "peripherals/bmi270_sensor.h"
+#include "peripherals/bmm150_sensor.h"
+
+
 #define TAG "AtomS3R+EchoBase"
 
 #define PI4IOE_ADDR          0x43
@@ -113,6 +117,8 @@ private:
     Pi4ioe* pi4ioe_ = nullptr;
     Lp5562* lp5562_ = nullptr;
     Display* display_ = nullptr;
+    Bmi270Sensor* bmi270_ = nullptr;
+    Bmm150Sensor* bmm150_ = nullptr;
     Button boot_button_;
     bool is_echo_base_connected_ = false;
     void InitializeI2c() {
@@ -136,6 +142,23 @@ private:
         i2c_bus_cfg.scl_io_num = GPIO_NUM_0;
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_internal_));
     }
+
+    void InitializeSensors() {
+        bmi270_ = new Bmi270Sensor(i2c_bus_);
+        if (!bmi270_->Init(100)) { // 100Hz ODR
+            ESP_LOGW(TAG, "BMI270 init failed");
+        } else {
+            ESP_LOGI(TAG, "BMI270 detected, WhoAmI=0x%02x", bmi270_->WhoAmI());
+        }
+
+        bmm150_ = new Bmm150Sensor(i2c_bus_);
+        if (!bmm150_->Init()) {
+            ESP_LOGW(TAG, "BMM150 init failed");
+        } else {
+            ESP_LOGI(TAG, "BMM150 detected, WhoAmI=0x%02x", bmm150_->WhoAmI());
+        }
+    }
+
 
     void I2cDetect() {
         is_echo_base_connected_ = false;
@@ -292,7 +315,13 @@ public:
         InitializeButtons();
         InitializeIot();
         GetBacklight()->RestoreBrightness();
+        InitializeSensors();
+
     }
+
+    Bmi270Sensor* GetImu() { return bmi270_; }
+    Bmm150Sensor* GetMag() { return bmm150_; }
+
 
     virtual AudioCodec* GetAudioCodec() override {
         static Es8311AudioCodec audio_codec(
