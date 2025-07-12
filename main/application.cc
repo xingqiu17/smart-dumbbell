@@ -46,7 +46,7 @@
 #define BMM150_I2C_ADDR_SDO1  0x11   // SDO=1 → 0x11
 #define AUX_READ_LEN_MAX      64
 QueueHandle_t Application::s_imuQueue = nullptr;   // 默认空
-
+QueueHandle_t Application::s_magQueue = nullptr;
 
 
 
@@ -143,26 +143,6 @@ static void dump_bmm150_regs()
 }
 
 
-/********************  AUTO-MODE 读取  ************************/
-static bool read_mag_uT_auto(const bmi2_sens_data &imu,float m[3])
-{
-    struct bmm150_mag_data r;
-    if (bmm150_aux_mag_data(const_cast<uint8_t*>(imu.aux_data),&r,&bmm)!=BMM150_OK)
-        return false;
-
-    constexpr float LSB2UT = 0.0625f;
-    m[0]=r.x*LSB2UT; m[1]=r.y*LSB2UT; m[2]=r.z*LSB2UT;
-    return true;
-}
-
-
-
-
-
-
-
-
-
 void Application::init_sensors()
 {
     /* ---------- 1. BMI270 + I²C 基础 ---------- */
@@ -228,6 +208,11 @@ void Application::init_sensors()
         s_imuQueue = xQueueCreate(/*length*/ 1, sizeof(bmi2_sens_data));
         configASSERT(s_imuQueue);          // 创建失败直接 reset
     }
+    if (s_magQueue == nullptr)
+    {
+        s_magQueue = xQueueCreate(/*length*/ 1, sizeof(float[3]));
+        configASSERT(s_magQueue);
+    }
 }
 
 
@@ -244,6 +229,15 @@ bool Application::GetLatestImu(bmi2_sens_data& out)
 
     return false;   // 队列暂时空
 }
+
+
+bool Application::GetLatestMag(float out[3])
+{
+    if (s_magQueue == nullptr) return false;
+    /* 立即返回，不阻塞；拷贝 3 个 float */
+    return xQueueReceive(s_magQueue, out, 0) == pdTRUE;
+}
+
 
 
 void Application::imu_task(void*)
@@ -271,7 +265,14 @@ void Application::imu_task(void*)
             //              imu.gyr.x, imu.gyr.y, imu.gyr.z,
             //              imu.acc.x, imu.acc.y, imu.acc.z,
             //              mag_uT[0], mag_uT[1], mag_uT[2]);
+
+                if (s_magQueue){
+                    /* 直接写 3 * float, 注意长度要与队列创建时一致 */
+                    xQueueOverwrite(s_magQueue, mag_uT);
+                }
             }
+            
+
         }
         vTaskDelay(pdMS_TO_TICKS(100));      // 50 Hz = 20 ms
     }

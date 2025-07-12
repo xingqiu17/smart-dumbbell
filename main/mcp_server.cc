@@ -13,6 +13,9 @@
 #include "application.h"
 #include "display.h"
 #include "board.h"
+#include "bmi2.h"
+#include "bmi270.h"
+#include "bmm150.h"
 
 #define TAG "MCP"
 
@@ -34,7 +37,9 @@ void McpServer::AddCommonTools() {
     // Backup the original tools list and restore it after adding the common tools.
     auto original_tools = std::move(tools_);
     auto& board = Board::GetInstance();
+    auto& app = Application::GetInstance();  //用于获取IMU信息
 
+    //获取状态工具
     AddTool("self.get_device_status",
         "Provides the real-time information of the device, including the current status of the audio speaker, screen, battery, network, etc.\n"
         "Use this tool for: \n"
@@ -45,6 +50,8 @@ void McpServer::AddCommonTools() {
             return board.GetDeviceStatusJson();
         });
 
+
+    //获取/设置音量工具
     AddTool("self.audio_speaker.set_volume", 
         "Set the volume of the audio speaker. If the current volume is unknown, you must call `self.get_device_status` tool first and then call this tool.",
         PropertyList({
@@ -102,6 +109,42 @@ void McpServer::AddCommonTools() {
                 return camera->Explain(question);
             });
     }
+
+
+    AddTool("self.imu.get_latest",
+        // == 描述 ==
+        // Return the most recent 9-DoF sample from BMI270/BMM150 as JSON.
+        // If no fresh data is available return success=false.
+        "Return the most recent IMU sample (acc, gyr, mag) as JSON.\n"
+        "No arguments required.",
+        PropertyList(),   // 无参数
+        [&app](const PropertyList&) -> ReturnValue {
+
+            bmi2_sens_data imu{};
+            float          mag[3];
+
+            /* 队列里是否都有新数据？            */
+            bool ok_imu = app.GetLatestImu(imu);
+            bool ok_mag = app.GetLatestMag(mag);
+
+            if (!(ok_imu && ok_mag))              // 任何一个没取到就算失败
+                return R"({"success":false,"message":"no_new_sample"})";
+
+            /* —— 拼 JSON —— */
+            char buf[320];
+            snprintf(buf, sizeof(buf),
+                    R"({"success":true,)"
+                    R"("acc":{"x":%d,"y":%d,"z":%d},)"
+                    R"("gyr":{"x":%d,"y":%d,"z":%d},)"
+                    R"("mag":{"x":%.2f,"y":%.2f,"z":%.2f}})",
+                    imu.acc.x, imu.acc.y, imu.acc.z,
+                    imu.gyr.x, imu.gyr.y, imu.gyr.z,
+                    mag[0], mag[1], mag[2]);
+
+            return std::string(buf);
+    });
+
+    
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());

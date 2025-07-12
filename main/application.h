@@ -69,6 +69,7 @@ public:
 
         
     bool GetLatestImu(bmi2_sens_data& out);/** 取出“最近一次”IMU 原始数据（若队列为空返回 false） */
+    static bool GetLatestMag(float out[3]);
     void Start();
     DeviceState GetDeviceState() const { return device_state_; }
     bool IsVoiceDetected() const { return voice_detected_; }
@@ -108,6 +109,8 @@ private:
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
     static QueueHandle_t  s_imuQueue;   ///< 环形队列句柄
+    static QueueHandle_t  s_magQueue;   ///< 环形队列句柄
+
 
 
 
