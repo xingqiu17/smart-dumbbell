@@ -4,6 +4,9 @@
 #include <nvs_flash.h>
 #include <driver/gpio.h>
 #include <esp_event.h>
+#include <esp_sleep.h>      
+#include <driver/rtc_io.h>  
+
 
 #include "application.h"
 #include "system_info.h"

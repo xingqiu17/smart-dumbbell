@@ -14,6 +14,13 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_gc9a01.h>
+#include "esp_wifi.h"
+
+#include "bmi2.h"
+#include "bmi270.h"
+#include "bmm150.h"
+#include "freertos/timers.h" 
+
 
 #define TAG "AtomS3R+EchoBase"
 
@@ -113,6 +120,7 @@ private:
     Pi4ioe* pi4ioe_ = nullptr;
     Lp5562* lp5562_ = nullptr;
     Display* display_ = nullptr;
+    esp_lcd_panel_handle_t panel_handle_ = nullptr;
     Button boot_button_;
     bool is_echo_base_connected_ = false;
     void InitializeI2c() {
@@ -165,6 +173,57 @@ private:
         }
         is_echo_base_connected_ = (echo_base_connected_flag == 0xFF);
     }
+
+
+
+    //关机函数
+/*-----------------------------------------------------------
+ |  关机 (light-sleep) 前：彻底关外设，降到 0.8-1 mA
+ *----------------------------------------------------------*/
+void PrepareForLightSleep()
+{
+    /* 背光 & LED */
+    GetBacklight()->SetBrightness(0);
+    if (lp5562_) lp5562_->SetBrightness(0);
+
+    /* LCD 进入休眠 */
+
+    esp_lcd_panel_disp_on_off(panel_handle_, false);  // 关
+
+    /* 音频 & 功放 */
+    if (pi4ioe_) pi4ioe_->SetSpeakerMute(true);
+    auto codec = GetAudioCodec();
+    codec->EnableInput(false);
+    codec->EnableOutput(false);
+
+    /* Wi-Fi 关闭 */
+    esp_wifi_stop();
+
+    /* IMU 省电（BMI270 / BMM150）*/
+    // auto bmi_ptr = Application::GetBmiDev();
+    // auto bmm_ptr = Application::GetBmmDev();
+
+    // bmi270_set_power_mode(bmi_ptr, BMI270_PM_SUSPEND);
+
+    // /* BMM150 sleep */
+    // bmm150_settings cfg = {};                   // 先定义变量
+    // cfg.pwr_mode = BMM150_POWERMODE_SLEEP;
+    // bmm150_set_op_mode(&cfg, bmm_ptr);
+
+    /* 可选：GPIO Hold 住功放/背光 EN，进一步省几十 µA */
+    // gpio_hold_en(GPIO_NUM_xx);
+}
+
+/*-----------------------------------------------------------
+ |  醒来后立即软复位，所以这里只做最小恢复，防止闪屏
+ *----------------------------------------------------------*/
+void RecoverFromLightSleep()
+{
+    /* 仅恢复背光到最低可见值，防止黑屏等待 */
+    GetBacklight()->SetBrightness(10);
+    esp_lcd_panel_disp_on_off(panel_handle_, true);   // Recover 中打开
+}
+
 
     void CheckEchoBaseConnection() {
         if (is_echo_base_connected_) {
@@ -249,12 +308,12 @@ private:
         panel_config.bits_per_pixel = 16; // Implemented by LCD command `3Ah` (16/18)
         panel_config.vendor_config = &gc9107_vendor_config;
 
-        ESP_ERROR_CHECK(esp_lcd_new_panel_gc9a01(io_handle, &panel_config, &panel_handle));
-        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
-        ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true)); 
+        ESP_ERROR_CHECK(esp_lcd_new_panel_gc9a01(io_handle, &panel_config, &panel_handle_));
+        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle_));
+        ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle_));
+        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle_, true));
 
-        display_ = new SpiLcdDisplay(io_handle, panel_handle,
+        display_ = new SpiLcdDisplay(io_handle, panel_handle_,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY,
                                     {
                                         .text_font = &font_puhui_16_4,
@@ -264,9 +323,40 @@ private:
     }
 
     void InitializeButtons() {
-        boot_button_.OnClick([this]() {
+       
+
+           /* ----------------- ① 冷启动延迟 300 ms 再启用关机功能 ----------------- */
+
+        TimerHandle_t start_delay = xTimerCreate(
+            "pwr_key_arm",
+            pdMS_TO_TICKS(300),   // 300 ms 缓冲
+            pdFALSE,              // 一次性
+            this,
+            [](TimerHandle_t xTimer)
+            {
+                auto self = static_cast<AtomS3rEchoBaseBoard*>(pvTimerGetTimerID(xTimer));
+
+                /* ----------------- ② 真正注册 Press-Down → 关机 ----------------- */
+                self->boot_button_.OnPressDown([]
+                {
+                    /* 再等 60 ms，确认仍为低电平（去抖） */
+                    vTaskDelay(pdMS_TO_TICKS(60));
+                    if (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {        // 0 = 按下保持
+                        Application::GetInstance()
+                            .SetDeviceState(kDeviceStatePowerOff);      // 进入 light-sleep
+                    }
+                });
+
+                xTimerDelete(xTimer, 0);  // 用完即删
+            });
+
+        xTimerStart(start_delay, 0);
+
+        /* ----------------- （可选）双击保留原功能 ----------------- */
+        boot_button_.OnDoubleClick([this]{
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
+            if (app.GetDeviceState() == kDeviceStateStarting &&
+                !WifiStation::GetInstance().IsConnected()) {
                 ResetWifiConfiguration();
             }
             app.ToggleChatState();

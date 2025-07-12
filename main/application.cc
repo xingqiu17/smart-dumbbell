@@ -16,6 +16,8 @@
 #include "bmm150.h"
 #include "i2c_bus.h"
 #include <esp_rom_sys.h>
+#include <esp_sleep.h>
+#include "boards/atoms3r-echo-base/config.h"
 
 
 
@@ -47,6 +49,10 @@
 #define AUX_READ_LEN_MAX      64
 QueueHandle_t Application::s_imuQueue = nullptr;   // 默认空
 QueueHandle_t Application::s_magQueue = nullptr;
+
+
+
+
 
 
 
@@ -297,6 +303,7 @@ static const char* const STATE_STRINGS[] = {
     "audio_testing",
     "fatal_error",
     "invalid_state"
+    "POWER_OFF"
 };
 
 Application::Application() {
@@ -1304,11 +1311,63 @@ void Application::SetDeviceState(DeviceState state) {
             }
             ResetDecoder();
             break;
+
+        case kDeviceStatePowerOff:                       // 🆕 light-sleep
+            EnterLightSleep();
+            break;
         default:
             // Do nothing
             break;
     }
 }
+
+
+// void Application::EnterDeepSleep()
+// {
+//     ESP_LOGI(TAG, "Preparing peripherals for deep-sleep…");
+
+//     auto& board = Board::GetInstance();
+//     //board.PrepareForDeepSleep();          当前未实现，暂时先注释
+
+//     // 触摸中断引脚（RTC capable）；请替换成实际 GPIO 号     
+//     constexpr gpio_num_t TOUCH_INT_GPIO = GPIO_NUM_7;
+
+//     // 关闭一切旧唤醒源，启用触摸作为 EXT1 唤醒
+//     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+//     esp_sleep_enable_ext1_wakeup(1ULL << TOUCH_INT_GPIO,
+//                                  ESP_EXT1_WAKEUP_ANY_HIGH);
+
+//     ESP_LOGI(TAG, "Entering deep-sleep now");
+//     esp_deep_sleep_start();               // 不返回
+// }
+
+
+bmi2_dev* Application::GetBmiDev() { return &bmi; }
+bmm150_dev* Application::GetBmmDev() { return &bmm; }  //暴露IMU接口
+
+
+void Application::EnterLightSleep()
+{
+    ESP_LOGI(TAG, "Preparing for light-sleep…");
+    auto& board = Board::GetInstance();
+    board.PrepareForLightSleep();
+
+    /* 重新配置 BOOT 键为输入上拉，低电平唤醒 */
+    gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY);
+    esp_sleep_enable_gpio_wakeup();
+    gpio_wakeup_enable(BOOT_BUTTON_GPIO, GPIO_INTR_LOW_LEVEL);
+
+    /* 真正进入 light-sleep —— 立即被 BOOT 低电平唤醒 */
+    esp_light_sleep_start();
+
+    /* 醒来后先恢复最基本外设（防闪黑），然后软复位 */
+    board.RecoverFromLightSleep();
+    ESP_LOGI(TAG, "Woke up from light-sleep, restarting …");
+    esp_restart();         
+}
+
+
 
 void Application::ResetDecoder() {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -45,7 +45,8 @@ enum DeviceState {
     kDeviceStateUpgrading,
     kDeviceStateActivating,
     kDeviceStateAudioTesting,
-    kDeviceStateFatalError
+    kDeviceStateFatalError,
+    kDeviceStatePowerOff   // 设备关机状态
 };
 
 #define OPUS_FRAME_DURATION_MS 60
@@ -54,6 +55,8 @@ enum DeviceState {
 
 
 struct bmi2_sens_data; 
+struct bmi2_dev;
+struct bmm150_dev;
 
 class Application {
 public:
@@ -67,7 +70,8 @@ public:
 
 
 
-        
+    static bmi2_dev* GetBmiDev();
+    static bmm150_dev* GetBmmDev();
     bool GetLatestImu(bmi2_sens_data& out);/** 取出“最近一次”IMU 原始数据（若队列为空返回 false） */
     static bool GetLatestMag(float out[3]);
     void Start();
@@ -158,6 +162,9 @@ private:
     void AudioLoop();
     void EnterAudioTestingMode();
     void ExitAudioTestingMode();
+    // void EnterDeepSleep();  // 进入深度睡眠模式
+    void EnterLightSleep();  // 进入浅睡眠模式
+
 };
 
 #endif // _APPLICATION_H_
