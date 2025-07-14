@@ -18,7 +18,7 @@
 #include <esp_rom_sys.h>
 #include <esp_sleep.h>
 #include "boards/atoms3r-echo-base/config.h"
-
+#include <limits>
 
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -244,6 +244,75 @@ bool Application::GetLatestMag(float out[3])
     return xQueueReceive(s_magQueue, out, 0) == pdTRUE;
 }
 
+
+void Application::imu_stat_task(void* arg)
+{
+    auto* self = static_cast<Application*>(arg);
+
+    /* 预先声明缓冲区 */
+    bmi2_sens_data imu{};
+    float mag[3]{};
+
+    while (true) {
+        /* ---------- 1) 初始化极值 ---------- */
+        int16_t acc_min[3] {  INT16_MAX,  INT16_MAX,  INT16_MAX };
+        int16_t acc_max[3] {  INT16_MIN,  INT16_MIN,  INT16_MIN };
+        int16_t gyr_min[3] {  INT16_MAX,  INT16_MAX,  INT16_MAX };
+        int16_t gyr_max[3] {  INT16_MIN,  INT16_MIN,  INT16_MIN };
+        float   mag_min[3] {  std::numeric_limits<float>::max(),
+                              std::numeric_limits<float>::max(),
+                              std::numeric_limits<float>::max() };
+        float   mag_max[3] { -std::numeric_limits<float>::max(),
+                             -std::numeric_limits<float>::max(),
+                             -std::numeric_limits<float>::max() };
+
+        /* ---------- 2) 在 5 s 窗口内循环采样 ---------- */
+        const TickType_t t_start = xTaskGetTickCount();
+        while (xTaskGetTickCount() - t_start < pdMS_TO_TICKS(5000))
+        {
+            /* a) 取 IMU 加速度 / 陀螺仪 */
+            if (self->GetLatestImu(imu)) {
+                /* 加速度 (acc.x/y/z) */
+                acc_min[0] = std::min(acc_min[0], imu.acc.x);
+                acc_max[0] = std::max(acc_max[0], imu.acc.x);
+                acc_min[1] = std::min(acc_min[1], imu.acc.y);
+                acc_max[1] = std::max(acc_max[1], imu.acc.y);
+                acc_min[2] = std::min(acc_min[2], imu.acc.z);
+                acc_max[2] = std::max(acc_max[2], imu.acc.z);
+                /* 陀螺仪 (gyr.x/y/z) */
+                gyr_min[0] = std::min(gyr_min[0], imu.gyr.x);
+                gyr_max[0] = std::max(gyr_max[0], imu.gyr.x);
+                gyr_min[1] = std::min(gyr_min[1], imu.gyr.y);
+                gyr_max[1] = std::max(gyr_max[1], imu.gyr.y);
+                gyr_min[2] = std::min(gyr_min[2], imu.gyr.z);
+                gyr_max[2] = std::max(gyr_max[2], imu.gyr.z);
+            }
+
+            /* b) 取磁力计 (micro-Tesla) */
+            if (self->GetLatestMag(mag)) {
+                for (int i = 0; i < 3; ++i) {
+                    mag_min[i] = std::min(mag_min[i], mag[i]);
+                    mag_max[i] = std::max(mag_max[i], mag[i]);
+                }
+            }
+
+            /* 每 10 ms 轮询一次就够快，50 Hz 采样不会漏太多峰值 */
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+
+        /* ---------- 3) 打印结果 ---------- */
+        ESP_LOGI("IMU_STAT",
+                 "ACC[min,max]=[%d,%d,%d | %d,%d,%d] "
+                 "GYR[min,max]=[%d,%d,%d | %d,%d,%d] "
+                 "MAG[min,max]=[%.2f,%.2f,%.2f | %.2f,%.2f,%.2f]",
+                 acc_min[0], acc_min[1], acc_min[2],
+                 acc_max[0], acc_max[1], acc_max[2],
+                 gyr_min[0], gyr_min[1], gyr_min[2],
+                 gyr_max[0], gyr_max[1], gyr_max[2],
+                 mag_min[0], mag_min[1], mag_min[2],
+                 mag_max[0], mag_max[1], mag_max[2]);
+    }
+}
 
 
 void Application::imu_task(void*)
@@ -685,7 +754,17 @@ void Application::Start() {
                         1);         // pin 到 Core 1
 
         imu_initialized_ = true;
+
+        xTaskCreatePinnedToCore(Application::imu_stat_task,
+                        "imu_stat_task",
+                        4096,
+                        this,     /* 传递 this 指针 */
+                        3,        /* 优先级 < imu_task */
+                        nullptr,
+                        1);
     }
+
+
 
     /* Setup the display */
     auto display = board.GetDisplay();
