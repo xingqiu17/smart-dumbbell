@@ -95,6 +95,8 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
 
+    
+
 private:
     Application();
     ~Application();
@@ -164,6 +166,7 @@ private:
     void ExitAudioTestingMode();
     // void EnterDeepSleep();  // 进入深度睡眠模式
     void EnterLightSleep();  // 进入浅睡眠模式
+    void classify_and_count();
 
 };
 
