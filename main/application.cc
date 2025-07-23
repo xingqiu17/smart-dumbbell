@@ -20,16 +20,22 @@
 #include "boards/atoms3r-echo-base/config.h"
 #include <limits>
 #include "mdns.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "settings.h"
 
 extern "C" {
 #include "Fusion/FusionAhrs.h"
 #include "Fusion/FusionMath.h"
 }
 
-extern "C" void websocket_server_start();
+
 
 //new
 
+#define WAKE_WORD_APPLY 0 //唤醒词是否启用    0 不启用    1 启用
+
+static bool ws_started = false;
 
 /* —— AHRS & 运动识别 —— */
 static FusionAhrs ahrs;               // 全局滤波器
@@ -87,7 +93,7 @@ static Exercise cur_exercise   = EX_UNKNOWN;
 #include <arpa/inet.h>
 
 #define TAG "Application"
-extern "C" void websocket_server_start();
+void websocket_server_start();
 
 #define BMM150_I2C_ADDR_SDO0  0x10   // SDO=0 → 0x10
 #define BMM150_I2C_ADDR_SDO1  0x11   // SDO=1 → 0x11
@@ -506,16 +512,16 @@ void Application::imu_task(void* arg)
                 float pitch = eu.angle.pitch;
                 float roll  = eu.angle.roll;
 
-                ESP_LOGI("9DOF",
-                        "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
-                        "ACC[g]=%.3f,%.3f,%.3f  "
-                        "GYR[dps]=%.1f,%.1f,%.1f  "
-                        "MAG[uT]=%.1f,%.1f,%.1f", 
-                        yaw, pitch, roll,
-                        imu.acc.x/ACC_LSB, imu.acc.y/ACC_LSB, imu.acc.z/ACC_LSB,
-                        gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
-                        mag_uT[0], mag_uT[1], mag_uT[2]);
-            }
+                // ESP_LOGI("9DOF",
+                //         "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
+                //         "ACC[g]=%.3f,%.3f,%.3f  "
+                //         "GYR[dps]=%.1f,%.1f,%.1f  "
+                //         "MAG[uT]=%.1f,%.1f,%.1f", 
+                //         yaw, pitch, roll,
+                //         imu.acc.x/ACC_LSB, imu.acc.y/ACC_LSB, imu.acc.z/ACC_LSB,
+                //         gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
+                //         mag_uT[0], mag_uT[1], mag_uT[2]);
+             }
 
 
             /* ====== ② 仍然打印日志 ====== */
@@ -559,6 +565,7 @@ static const char* const STATE_STRINGS[] = {
 };
 
 Application::Application() {
+    
     event_group_ = xEventGroupCreate();
     background_task_ = new BackgroundTask(4096 * 7);
 
@@ -609,6 +616,28 @@ Application::~Application() {
     }
     vEventGroupDelete(event_group_);
 }
+
+// void Application::StartWakeDetectionIfNeeded() {
+//     if (WAKE_WORD_APPLY) {
+//         // 原有逻辑：被动监听唤醒词
+//         wake_word_->StartDetection();
+//     } else {
+//         // 新增逻辑：主动进入 Listening 模式
+//         // 1. 如果没打开音频通道，先切到 Connecting 并打开它
+//         if (!protocol_->IsAudioChannelOpened()) {
+//             SetDeviceState(kDeviceStateConnecting);
+//             if (!protocol_->OpenAudioChannel()) {
+//                 // 通道打开失败，退回 Idle（也可继续唤醒词检测）
+//                 SetDeviceState(kDeviceStateIdle);
+//                 return;
+//             }
+//         }
+//         // 2. 通道打开后，直接进入 Listening
+//         SetListeningMode(kListeningModeAutoStop);
+//     }
+// }
+
+
 
 void Application::CheckNewVersion() {
     const int MAX_RETRY = 10;
@@ -913,6 +942,26 @@ void Application::StopListening() {
 }
 
 void Application::Start() {
+
+    ESP_ERROR_CHECK(nvs_flash_init());
+    // NVS 初始化后，再创建 Settings 实例
+    pairing_settings_ = std::make_unique<Settings>("pairing", /*read_write=*/true);
+
+    // 在 board.StartNetwork() 之后，不要直接调用 websocket_server_start()
+    ESP_LOGI(TAG, "注册 IP_EVENT_STA_GOT_IP 回调");
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        IP_EVENT,
+        IP_EVENT_STA_GOT_IP,
+        [](void* arg, esp_event_base_t base, int32_t id, void* data) {
+            if (!ws_started) {
+                ESP_LOGI(TAG, "获取到 IP，启动 WebSocket 服务");
+                websocket_server_start();
+                ws_started = true;
+            }
+        },
+        nullptr  // 不需要 user_ctx
+    ));
+
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
 
@@ -992,13 +1041,18 @@ void Application::Start() {
     /* Start the clock timer to update the status bar */
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
 
+
+
     /* Wait for the network to be ready */
     board.StartNetwork();
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
 
-    websocket_server_start();               // ★ 启本地 WS 服务器
+
+
+
+    //websocket_server_start();               // ★ 启本地 WS 服务器
 
         /*************** mDNS 初始化 & 注册 ****************/
     {

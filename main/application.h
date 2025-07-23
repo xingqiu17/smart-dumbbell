@@ -23,6 +23,7 @@
 #include "audio_processor.h"
 #include "wake_word.h"
 #include "audio_debugger.h"
+#include "settings.h"
 
 #define SCHEDULE_EVENT (1 << 0)
 #define SEND_AUDIO_EVENT (1 << 1)
@@ -94,6 +95,7 @@ public:
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
+    Settings& GetPairingSettings() { return *pairing_settings_;}
 
     
 
@@ -116,6 +118,7 @@ private:
     AecMode aec_mode_ = kAecOff;
     static QueueHandle_t  s_imuQueue;   ///< 环形队列句柄
     static QueueHandle_t  s_magQueue;   ///< 环形队列句柄
+    std::unique_ptr<Settings> pairing_settings_;   // 新增：配对用 NVS
 
 
 
@@ -148,6 +151,7 @@ private:
     OpusResampler output_resampler_;
 
 
+    void StartWakeDetectionIfNeeded();
     static void init_i2c();
     static void init_sensors();
     static void imu_task(void*);
