@@ -26,7 +26,11 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "FusionAhrs.c"
             "FusionCompass.c"
             "FusionOffset.c"
+<<<<<<< HEAD
             "websocket_srv.c"
+=======
+            "websocket_srv.cc"
+>>>>>>> master
             )
 
 set(INCLUDE_DIRS "." "display" "audio_codecs" "protocols" "audio_processing")

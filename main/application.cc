@@ -20,6 +20,7 @@
 #include "boards/atoms3r-echo-base/config.h"
 #include <limits>
 #include "mdns.h"
+<<<<<<< HEAD
 
 extern "C" {
 #include "FusionAhrs.h"
@@ -42,6 +43,24 @@ extern "C" void websocket_server_start();
 
 //new
 float rms_omega_y = 0.0f; // 用于计算平滑度的 Y 轴角速度 RMSb
+=======
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "settings.h"
+
+extern "C" {
+#include "Fusion/FusionAhrs.h"
+#include "Fusion/FusionMath.h"
+}
+
+
+
+//new
+
+#define WAKE_WORD_APPLY 0 //唤醒词是否启用    0 不启用    1 启用
+
+static bool ws_started = false;
+>>>>>>> master
 
 /* —— AHRS & 运动识别 —— */
 static FusionAhrs ahrs;               // 全局滤波器
@@ -72,8 +91,15 @@ static size_t   wrIdx   = 0;                   // 写指针
 static bool     inSlice = false;               // “正在动作片段” 标志
                   // 写指针
 
+<<<<<<< HEAD
 static Exercise cur_exercise   = EX_UNKNOWN;
 
+=======
+
+/* —— 简易动作分类 —— */
+enum Exercise   { EX_UNKNOWN, EX_CURL, EX_SHOULDER_PRESS, EX_LATERAL_RAISE };
+static Exercise cur_exercise   = EX_UNKNOWN;
+>>>>>>> master
 
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -97,7 +123,7 @@ static Exercise cur_exercise   = EX_UNKNOWN;
 #include <arpa/inet.h>
 
 #define TAG "Application"
-
+void websocket_server_start();
 
 #define BMM150_I2C_ADDR_SDO0  0x10   // SDO=0 → 0x10
 #define BMM150_I2C_ADDR_SDO1  0x11   // SDO=1 → 0x11
@@ -105,7 +131,12 @@ static Exercise cur_exercise   = EX_UNKNOWN;
 QueueHandle_t Application::s_imuQueue = nullptr;   // 默认空
 QueueHandle_t Application::s_magQueue = nullptr;
 
-
+QueueHandle_t Application::s_jsonQueue = nullptr;
+QueueHandle_t Application::GetJsonQueue() { return s_jsonQueue; }
+Application& Application::GetInstance() {
+    static Application instance;
+    return instance;
+}
 
 
 
@@ -366,12 +397,28 @@ void Application::imu_stat_task(void* arg)
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 
+<<<<<<< HEAD
+=======
+        
+        /* ---------- 3) 打印结果 ---------- */
+        // ESP_LOGI("IMU_STAT",
+        //          "ACC[min,max]=[%d,%d,%d | %d,%d,%d] "
+        //          "GYR[min,max]=[%d,%d,%d | %d,%d,%d] "
+        //          "MAG[min,max]=[%.2f,%.2f,%.2f | %.2f,%.2f,%.2f]",
+        //          acc_min[0], acc_min[1], acc_min[2],
+        //          acc_max[0], acc_max[1], acc_max[2],
+        //          gyr_min[0], gyr_min[1], gyr_min[2],
+        //          gyr_max[0], gyr_max[1], gyr_max[2],
+        //          mag_min[0], mag_min[1], mag_min[2],
+        //          mag_max[0], mag_max[1], mag_max[2]);
+>>>>>>> master
     }
 }
 
 
 void Application::imu_task(void* arg)
 {
+    auto* self = static_cast<Application*>(arg);
     bmi2_sens_data imu{};      // 本地缓冲
     bmm150_mag_data mag{}; 
     float          mag_uT[3];
@@ -388,6 +435,11 @@ void Application::imu_task(void* arg)
             constexpr float DEG2RAD = 0.0174532925f;
 
             // 1) 原始计数 -> 物理量
+<<<<<<< HEAD
+=======
+            /* ① —— 把 acc 转成 m/s² —— */
+            constexpr float G_TO_MS2 = 9.80665f;
+>>>>>>> master
             float ax =  imu.acc.x / ACC_LSB ;
             float ay =  imu.acc.y / ACC_LSB ;
             float az =  imu.acc.z / ACC_LSB ;
@@ -427,6 +479,7 @@ void Application::imu_task(void* arg)
 
             // 3) 取俯仰角
             FusionEuler e = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
+<<<<<<< HEAD
 
                         /* ---------- 计数 & 分类核心 ---------- */
             constexpr float GYR_TH   = 12.5f * DEG2RAD;   // 上升 / 下降阈值
@@ -441,6 +494,15 @@ void Application::imu_task(void* arg)
             static uint64_t  t_phase_start = 0;
 
             /* ---- 低通滤波后的陀螺仪 Y ---- */
+=======
+            float pitch_deg = e.angle.pitch;
+
+                        /* ---------- 计数 & 分类核心 ---------- */
+            constexpr float GYR_TH   = 15.0f * DEG2RAD;   // 上升 / 下降阈值
+            constexpr float GYR_HYST =  5.0f * DEG2RAD;   // 静止滞环
+
+            /* 低通过滤 Y 轴角速度（弯举主要绕 Y）*/
+>>>>>>> master
             float gy_raw = (imu.gyr.y / GYR_LSB) * DEG2RAD;
             static float gy_lp = 0.0f;
             gy_lp = 0.8f * gy_lp + 0.2f * gy_raw;
@@ -449,6 +511,7 @@ void Application::imu_task(void* arg)
             FusionEuler eu = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
             float pitch = eu.angle.pitch;
             float roll  = eu.angle.roll;
+<<<<<<< HEAD
             
                         /* feed RMS 缓冲 —— 放在采样更新最底部 */
             static float win_omega2[50];              // 0.5 s 窗口（100 Hz）
@@ -465,6 +528,9 @@ void Application::imu_task(void* arg)
             /* ---- 本次采样的加速度模长 ---- */
             float acc_mag = sqrtf(ax*ax + ay*ay + az*az);   // ★★★ NEW
         
+=======
+
+>>>>>>> master
             /* ------------ 四状态机 ------------- */
             switch (phase) {
             case PHASE_IDLE:
@@ -472,6 +538,7 @@ void Application::imu_task(void* arg)
                     phase = PHASE_UP;
                     pMax = pMin = pitch;                 // 清极值
                     rMax = rMin = roll ;
+<<<<<<< HEAD
                     cycle_start_us = now_us;                    // 复位计时
                     t_phase_start = now_us;
                     peak_gyr_y = fabsf(gy_raw);
@@ -481,6 +548,8 @@ void Application::imu_task(void* arg)
                     sum_gyr_y    = fabsf(gy_raw);
                     sample_cnt   = 1;
                     peak_acc_mag = acc_mag;
+=======
+>>>>>>> master
                 }
                 break;
 
@@ -489,6 +558,7 @@ void Application::imu_task(void* arg)
                 pMin = std::min(pMin, pitch);
                 rMax = std::max(rMax, roll );
                 rMin = std::min(rMin, roll );
+<<<<<<< HEAD
                             /* ★★★ NEW: 累积统计 */
                 peak_gyr_y   = std::max(peak_gyr_y, fabsf(gy_raw));
                 sum_gyr_y   += fabsf(gy_raw);
@@ -505,6 +575,15 @@ void Application::imu_task(void* arg)
                     phase = PHASE_DOWN;
                     t_phase_start = now_us;
             }
+=======
+                if (fabsf(gy_lp) < GYR_HYST)             // 到顶
+                    phase = PHASE_TOP;
+                break;
+
+            case PHASE_TOP:
+                if (gy_lp < -GYR_TH)                     // 开始下降
+                    phase = PHASE_DOWN;
+>>>>>>> master
                 break;
 
             case PHASE_DOWN:
@@ -512,6 +591,7 @@ void Application::imu_task(void* arg)
                 pMin = std::min(pMin, pitch);
                 rMax = std::max(rMax, roll );
                 rMin = std::min(rMin, roll );
+<<<<<<< HEAD
                                 /* ★★★ NEW: 累积统计 */
                 peak_gyr_y   = std::max(peak_gyr_y, fabsf(gy_raw));
                 sum_gyr_y   += fabsf(gy_raw);
@@ -569,6 +649,20 @@ void Application::imu_task(void* arg)
                     ESP_LOGI("FIT",
                             "Rep=%d  act=%d  ΔP=%.1f  ΔR=%.1f  t=%.2f s  score=%.1f  avg=%.1f",
                             rep_cnt, cur_exercise, dP, dR, rep_us/1e6f, score, avg);
+=======
+                if (fabsf(gy_lp) < GYR_HYST) {           // 动作完成
+                    float dP = pMax - pMin;
+                    float dR = rMax - rMin;
+
+                    /* --- 分类 --- */
+                    if (dP > 25 && dR < 20)         cur_exercise = EX_CURL;
+                    else if (dR > 30)               cur_exercise = EX_LATERAL_RAISE;
+                    else                            cur_exercise = EX_SHOULDER_PRESS;
+
+                    rep_cnt++;
+                    ESP_LOGI("FIT","Rep=%u act=%d ΔP=%.1f ΔR=%.1f",
+                            rep_cnt, cur_exercise, dP, dR);
+>>>>>>> master
 
                     phase = PHASE_IDLE;
                 }
@@ -586,6 +680,7 @@ void Application::imu_task(void* arg)
                 float pitch = eu.angle.pitch;
                 float roll  = eu.angle.roll;
 
+<<<<<<< HEAD
                 ESP_LOGI("9DOF",
                         "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
                         "ACC[g]=%.3f,%.3f,%.3f  "
@@ -596,6 +691,18 @@ void Application::imu_task(void* arg)
                         gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
                         mag_uT[0], mag_uT[1], mag_uT[2]);
             }
+=======
+                // ESP_LOGI("9DOF",
+                //         "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
+                //         "ACC[g]=%.3f,%.3f,%.3f  "
+                //         "GYR[dps]=%.1f,%.1f,%.1f  "
+                //         "MAG[uT]=%.1f,%.1f,%.1f", 
+                //         yaw, pitch, roll,
+                //         imu.acc.x/ACC_LSB, imu.acc.y/ACC_LSB, imu.acc.z/ACC_LSB,
+                //         gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
+                //         mag_uT[0], mag_uT[1], mag_uT[2]);
+             }
+>>>>>>> master
 
 
             /* ====== ② 仍然打印日志 ====== */
@@ -639,6 +746,7 @@ static const char* const STATE_STRINGS[] = {
 };
 
 Application::Application() {
+    
     event_group_ = xEventGroupCreate();
     background_task_ = new BackgroundTask(4096 * 7);
 
@@ -689,6 +797,28 @@ Application::~Application() {
     }
     vEventGroupDelete(event_group_);
 }
+
+// void Application::StartWakeDetectionIfNeeded() {
+//     if (WAKE_WORD_APPLY) {
+//         // 原有逻辑：被动监听唤醒词
+//         wake_word_->StartDetection();
+//     } else {
+//         // 新增逻辑：主动进入 Listening 模式
+//         // 1. 如果没打开音频通道，先切到 Connecting 并打开它
+//         if (!protocol_->IsAudioChannelOpened()) {
+//             SetDeviceState(kDeviceStateConnecting);
+//             if (!protocol_->OpenAudioChannel()) {
+//                 // 通道打开失败，退回 Idle（也可继续唤醒词检测）
+//                 SetDeviceState(kDeviceStateIdle);
+//                 return;
+//             }
+//         }
+//         // 2. 通道打开后，直接进入 Listening
+//         SetListeningMode(kListeningModeAutoStop);
+//     }
+// }
+
+
 
 void Application::CheckNewVersion() {
     const int MAX_RETRY = 10;
@@ -852,6 +982,50 @@ void Application::DismissAlert() {
     }
 }
 
+
+// 2) 消息处理任务
+void Application::MessageProcessingTask(void* pv) {
+    auto* app = static_cast<Application*>(pv);
+    char* jsonPtr = nullptr;
+
+    while (true) {
+        // 阻塞等待，有新 JSON 就拿出来
+        if (xQueueReceive(s_jsonQueue, &jsonPtr, portMAX_DELAY) == pdTRUE) {
+            // 解析并处理
+            app->handleStartTrainingJson(jsonPtr);
+            // 处理完记得 free 掉 strdup 出来的内存
+            free(jsonPtr);
+        }
+    }
+}
+
+// 3) JSON 解析并分发逻辑
+void Application::handleStartTrainingJson(char* json) {
+    cJSON* root = cJSON_Parse(json);
+    if (!root) {
+        ESP_LOGE(TAG, "handleStartTrainingJson: invalid JSON");
+        return;
+    }
+
+    ESP_LOGI("TAG", "Received JSON: %s", json);
+    // 取 items 数组
+    cJSON* items = cJSON_GetObjectItem(root, "items");
+    if (items && cJSON_IsArray(items)) {
+        int count = cJSON_GetArraySize(items);
+        for (int i = 0; i < count; ++i) {
+            cJSON* it = cJSON_GetArrayItem(items, i);
+            int type   = cJSON_GetObjectItem(it, "type")->valueint;
+            int reps   = cJSON_GetObjectItem(it, "reps")->valueint;
+            int weight = cJSON_GetObjectItem(it, "weight")->valueint;
+            // 调用你的训练逻辑，比如：
+           
+        }
+    }
+
+    cJSON_Delete(root);
+}
+
+
 void Application::PlaySound(const std::string_view& sound) {
     // Wait for the previous sound to finish
     {
@@ -993,6 +1167,42 @@ void Application::StopListening() {
 }
 
 void Application::Start() {
+
+    ESP_ERROR_CHECK(nvs_flash_init());
+    // NVS 初始化后，再创建 Settings 实例
+    pairing_settings_ = std::make_unique<Settings>("pairing", /*read_write=*/true);
+
+     // ─── 在这里新增：创建 JSON 队列 & 启动处理任务 ───
+    s_jsonQueue = xQueueCreate(5, sizeof(char*));
+    if (!s_jsonQueue) {
+        ESP_LOGE(TAG, "Start: failed to create JSON queue");
+    } else {
+        xTaskCreate(
+            MessageProcessingTask,   // 任务入口
+            "MsgProcTask",           // 任务名
+            4096,                    // 栈大小
+            this,                    // 参数传 this 指针
+            tskIDLE_PRIORITY + 1,    // 优先级
+            nullptr                  // 不要任务句柄
+        );
+    }
+    // ─── 新增结束 ───
+
+    // 在 board.StartNetwork() 之后，不要直接调用 websocket_server_start()
+    ESP_LOGI(TAG, "注册 IP_EVENT_STA_GOT_IP 回调");
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        IP_EVENT,
+        IP_EVENT_STA_GOT_IP,
+        [](void* arg, esp_event_base_t base, int32_t id, void* data) {
+            if (!ws_started) {
+                ESP_LOGI(TAG, "获取到 IP，启动 WebSocket 服务");
+                websocket_server_start();
+                ws_started = true;
+            }
+        },
+        nullptr  // 不需要 user_ctx
+    ));
+
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
 
@@ -1072,13 +1282,22 @@ void Application::Start() {
     /* Start the clock timer to update the status bar */
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
 
+
+
     /* Wait for the network to be ready */
     board.StartNetwork();
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
 
+<<<<<<< HEAD
     websocket_server_start();               // ★ 启本地 WS 服务器
+=======
+
+
+
+    //websocket_server_start();               // ★ 启本地 WS 服务器
+>>>>>>> master
 
         /*************** mDNS 初始化 & 注册 ****************/
     {
@@ -1825,6 +2044,53 @@ void Application::SetAecMode(AecMode mode) {
     });
 }
 
+<<<<<<< HEAD
 
 
 
+=======
+// // application.cc（可放在文件底部，或者任何编译期可见的位置）
+// void Application::classify_and_count()
+// {
+//     /* ---------- 1) 从缓冲拿一整段 ---------- */
+//     constexpr uint64_t WINDOW_US = 1000000;   // ≤1 s 动作
+//     uint64_t t_now = esp_timer_get_time();
+
+//     float pitch_max = -1e9f, pitch_min = 1e9f;
+//     float roll_max  = -1e9f, roll_min  = 1e9f;
+
+//     size_t idx = (wrIdx + IMU_BUF_LEN - 1) % IMU_BUF_LEN;
+//     for (size_t n = 0; n < IMU_BUF_LEN; ++n) {
+//         const ImuFrame& f = imuBuf[idx];
+//         if (t_now - f.ts > WINDOW_US) break;
+
+//         /* 用 AHRS 算出的欧拉角——实时转一次就行 */
+//         FusionEuler eu = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
+//         pitch_max = std::max(pitch_max, eu.angle.pitch);
+//         roll_max  = std::max(roll_max , eu.angle.roll );
+//         roll_min  = std::min(roll_min , eu.angle.roll );
+
+//         idx = (idx + IMU_BUF_LEN - 1) % IMU_BUF_LEN;
+//     }
+
+//     float dPitch = fabsf(pitch_max - pitch_min);
+//     float dRoll  = fabsf(roll_max  - roll_min );
+
+//     /* ---------- 2) 分类 ---------- */
+//     if (dPitch > 40 && dRoll < 20)          cur_exercise = EX_CURL;
+//     else if (dRoll > 35)                    cur_exercise = EX_LATERAL_RAISE;
+//     else                                    cur_exercise = EX_SHOULDER_PRESS;
+
+//     /* ---------- 3) 计数 ---------- */
+//     static uint64_t last_rep_time = 0;
+//     const uint64_t MIN_REP_INTERVAL_US = 400000;     // 至少 0.4 s
+//     if (t_now - last_rep_time > MIN_REP_INTERVAL_US) {
+//         ++rep_cnt;
+//         last_rep_time = t_now;
+//     }
+
+//     ESP_LOGI("FIT",
+//              "Rep=%lu act=%d ΔP=%.1f ΔR=%.1f",
+//              rep_cnt, cur_exercise, dPitch, dRoll);
+// }
+>>>>>>> master

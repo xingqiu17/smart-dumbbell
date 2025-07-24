@@ -23,6 +23,10 @@
 #include "audio_processor.h"
 #include "wake_word.h"
 #include "audio_debugger.h"
+#include "settings.h"
+#pragma once
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #define SCHEDULE_EVENT (1 << 0)
 #define SEND_AUDIO_EVENT (1 << 1)
@@ -54,6 +58,9 @@ enum DeviceState {
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
 
 
+
+
+
 struct bmi2_sens_data; 
 struct bmi2_dev;
 struct bmm150_dev;
@@ -75,15 +82,13 @@ enum Exercise {
 
 class Application {
 public:
-    static Application& GetInstance() {
-        static Application instance;
-        return instance;
-    }
+
     // 删除拷贝构造函数和赋值运算符
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
 
 
+    static Application& GetInstance();
     static void imu_stat_task(void* arg);
     static bmi2_dev* GetBmiDev();
     static bmm150_dev* GetBmmDev();
@@ -109,6 +114,23 @@ public:
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
+    Settings& GetPairingSettings() { return *pairing_settings_;}
+    /* ────────────────────────── 新增 ────────────────────────── */
+    /** JSON 消息队列，存 strdup() 出来的 char* */
+    static QueueHandle_t s_jsonQueue;
+
+    /** ws_handler 会调用，把接收到的 JSON char* 推入这里 */
+    static QueueHandle_t GetJsonQueue();
+
+    /** 启动后台消费任务时的入口函数 */
+    static void MessageProcessingTask(void* pv);
+
+    /** 真正解析并分发 start_training JSON 的函数 */
+    void handleStartTrainingJson(char* json);
+    /* ────────────────────────── 新增 End ────────────────────────── */
+
+
+    
 
     
 
@@ -131,6 +153,7 @@ private:
     AecMode aec_mode_ = kAecOff;
     static QueueHandle_t  s_imuQueue;   ///< 环形队列句柄
     static QueueHandle_t  s_magQueue;   ///< 环形队列句柄
+    std::unique_ptr<Settings> pairing_settings_;   // 新增：配对用 NVS
 
 
 
@@ -165,6 +188,7 @@ private:
         
     
 
+    void StartWakeDetectionIfNeeded();
     static void init_i2c();
     static void init_sensors();
     static void imu_task(void*);
@@ -184,8 +208,12 @@ private:
     // void EnterDeepSleep();  // 进入深度睡眠模式
     void EnterLightSleep();  // 进入浅睡眠模式
     void classify_and_count();
+<<<<<<< HEAD
     static float score_rep(Exercise type, float dP, float dR, uint64_t dt_us);
     static Exercise classify_rep(const float v_base[3],float dPitch, float dRoll,float rms_omega);
+=======
+
+>>>>>>> master
 };
 
 #endif // _APPLICATION_H_
