@@ -208,12 +208,8 @@ private:
     // void EnterDeepSleep();  // 进入深度睡眠模式
     void EnterLightSleep();  // 进入浅睡眠模式
     void classify_and_count();
-<<<<<<< HEAD
     static float score_rep(Exercise type, float dP, float dR, uint64_t dt_us);
     static Exercise classify_rep(const float v_base[3],float dPitch, float dRoll,float rms_omega);
-=======
-
->>>>>>> master
 };
 
 #endif // _APPLICATION_H_
