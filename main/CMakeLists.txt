@@ -23,12 +23,18 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "settings.cc"
             "background_task.cc"
             "main.cc"
+            "FusionAhrs.c"
+            "FusionCompass.c"
+            "FusionOffset.c"
+            "websocket_srv.c"
             )
 
 set(INCLUDE_DIRS "." "display" "audio_codecs" "protocols" "audio_processing")
 list(APPEND INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/managed_components/cfscn__sensorlib/src/bosch/BMM150
 )
+
+
 
 # 添加 IOT 相关文件
 file(GLOB IOT_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/iot/things/*.cc)
@@ -272,6 +278,8 @@ idf_component_register(SRCS ${SOURCES}
                         cfscn__sensorlib
                         esp-opus
                         esp-opus-encoder
+                        mdns
+                        esp_http_server
                                     )
 
 # 使用 target_compile_definitions 来定义 BOARD_TYPE, BOARD_NAME

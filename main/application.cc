@@ -19,6 +19,61 @@
 #include <esp_sleep.h>
 #include "boards/atoms3r-echo-base/config.h"
 #include <limits>
+#include "mdns.h"
+
+extern "C" {
+#include "FusionAhrs.h"
+#include "FusionMath.h"
+#include "rep_scorer.h"
+}
+
+static Eloquent::ML::Port::RandomForestRegressor repModel; // 模型
+
+static inline FusionQuaternion QuaternionConjugate(const FusionQuaternion& q)
+{
+    FusionQuaternion qc = { q.element.w,        // w 不变
+                           -q.element.x,
+                           -q.element.y,
+                           -q.element.z };
+    return qc;
+}
+
+extern "C" void websocket_server_start();
+
+//new
+float rms_omega_y = 0.0f; // 用于计算平滑度的 Y 轴角速度 RMSb
+
+/* —— AHRS & 运动识别 —— */
+static FusionAhrs ahrs;               // 全局滤波器
+static bool     ahrs_inited = false;
+
+/***************  头部增加几个静态变量  ***************/
+static constexpr float DEG2RAD = 0.0174532925f; // conversion factor from degrees to radians
+
+
+/* ---------- 动作计数用四状态机 ---------- */
+enum Phase { PHASE_IDLE, PHASE_UP, PHASE_TOP, PHASE_DOWN };
+static Phase phase = PHASE_IDLE;
+static float pMax, pMin, rMax, rMin;
+static int rep_cnt=0;
+
+
+
+// application.cc 里（建议在最前面 IMU 相关静态变量附近）
+struct ImuFrame {
+    float ax, ay, az;          // g
+    float gx, gy, gz;          // rad/s
+    uint64_t ts;               // µs 时间戳，可做节拍
+};
+
+static constexpr size_t IMU_BUF_LEN = 128;     // 100 Hz 采样 ≈1.28 s
+static ImuFrame imuBuf[IMU_BUF_LEN];
+static size_t   wrIdx   = 0;                   // 写指针
+static bool     inSlice = false;               // “正在动作片段” 标志
+                  // 写指针
+
+static Exercise cur_exercise   = EX_UNKNOWN;
+
 
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -148,15 +203,27 @@ static void dump_bmm150_regs()
              raw[0],raw[1],raw[2],raw[3],raw[4],raw[5],raw[6],raw[7]);
 }
 
-
 void Application::init_sensors()
 {
-    /* ---------- 1. BMI270 + I²C 基础 ---------- */
+   /* ---------- 1. BMI270 + I²C 基础 ---------- */
     bmi.intf           = BMI2_I2C_INTF;
     bmi.read           = bmi2_i2c_read;
     bmi.write          = bmi2_i2c_write;
     bmi.delay_us       = bmi2_delay_us;
     ESP_ERROR_CHECK(bmi270_init(&bmi));
+
+    // ② 只在第一次调用时初始化 AHRS
+FusionAhrsInitialise(&ahrs);          // 内部自带默认参数 :contentReference[oaicite:1]{index=1}
+
+FusionAhrsSettings settings = {
+    .convention            = FusionConventionNwu, // NWU/NED/ENU 三选一
+    .gain                  = 0.8f,               // 相当于 Madgwick β :contentReference[oaicite:2]{index=2}
+    .gyroscopeRange        = 250.0f,              // °/s，决定“角速度恢复”阈值
+    .accelerationRejection = 10.0f,               // 动态拒绝直线加速度 (°)
+    .magneticRejection     = 15.0f,               // 动态拒绝磁畸变   (°)
+    .recoveryTriggerPeriod = 5,                   // 5 个采样点触发恢复
+};
+FusionAhrsSetSettings(&ahrs, &settings);          // 应用自定义参数 :contentReference[oaicite:3]{index=3}
 
     /* 2. 先把 ACC / GYR / AUX 都 enable，AUX 进入“手动模式” */
     bmi2_sens_config cfg[3]{};
@@ -164,9 +231,9 @@ void Application::init_sensors()
     cfg[1].type = BMI2_GYRO;
     cfg[2].type = BMI2_AUX;
 
-    /* 2-1) 给 ACC / GYR 一个最基本的 ODR（50 Hz）——随意 */
-    cfg[0].cfg.acc.odr = BMI2_ACC_ODR_50HZ;
-    cfg[1].cfg.gyr.odr = BMI2_GYR_ODR_50HZ;
+    /* 2-1) 给 ACC / GYR 一个最基本的 ODR（100 Hz）——随意 */
+    cfg[0].cfg.acc.odr = BMI2_ACC_ODR_100HZ;
+    cfg[1].cfg.gyr.odr = BMI2_GYR_ODR_100HZ;
 
     /* 2-2) AUX 手动模式参数（完全抄官方例程）*/
     auto &aux = cfg[2].cfg.aux;
@@ -176,7 +243,7 @@ void Application::init_sensors()
     aux.i2c_device_addr = BMM150_I2C_ADDR_SDO0;/* 0x10 */
     aux.man_rd_burst    = BMI2_AUX_READ_LEN_3; // 8 byte 连读
     aux.read_addr       = BMM150_REG_DATA_X_LSB; /* 0x42 */
-    aux.odr             = BMI2_AUX_ODR_50HZ;
+    aux.odr             = BMI2_AUX_ODR_100HZ;
 
     ESP_ERROR_CHECK(bmi270_set_sensor_config(cfg, 3, &bmi));
     ESP_ERROR_CHECK(bmi270_sensor_enable((uint8_t[]){BMI2_ACCEL,BMI2_GYRO,BMI2_AUX},3,&bmi));
@@ -295,27 +362,15 @@ void Application::imu_stat_task(void* arg)
                     mag_max[i] = std::max(mag_max[i], mag[i]);
                 }
             }
-
             /* 每 10 ms 轮询一次就够快，50 Hz 采样不会漏太多峰值 */
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 
-        /* ---------- 3) 打印结果 ---------- */
-        ESP_LOGI("IMU_STAT",
-                 "ACC[min,max]=[%d,%d,%d | %d,%d,%d] "
-                 "GYR[min,max]=[%d,%d,%d | %d,%d,%d] "
-                 "MAG[min,max]=[%.2f,%.2f,%.2f | %.2f,%.2f,%.2f]",
-                 acc_min[0], acc_min[1], acc_min[2],
-                 acc_max[0], acc_max[1], acc_max[2],
-                 gyr_min[0], gyr_min[1], gyr_min[2],
-                 gyr_max[0], gyr_max[1], gyr_max[2],
-                 mag_min[0], mag_min[1], mag_min[2],
-                 mag_max[0], mag_max[1], mag_max[2]);
     }
 }
 
 
-void Application::imu_task(void*)
+void Application::imu_task(void* arg)
 {
     bmi2_sens_data imu{};      // 本地缓冲
     bmm150_mag_data mag{}; 
@@ -327,6 +382,221 @@ void Application::imu_task(void*)
 
             /* ====== ① 推进队列 ====== */
             if (s_imuQueue) { xQueueOverwrite(s_imuQueue, &imu); }
+                        /* ====== 姿态解算 ====== */
+            constexpr float ACC_LSB = 16384.0f;             // ±2 g
+            constexpr float GYR_LSB = 131.0f;               // ±250 °/s
+            constexpr float DEG2RAD = 0.0174532925f;
+
+            // 1) 原始计数 -> 物理量
+            float ax =  imu.acc.x / ACC_LSB ;
+            float ay =  imu.acc.y / ACC_LSB ;
+            float az =  imu.acc.z / ACC_LSB ;
+            float gx = (imu.gyr.x / GYR_LSB) * DEG2RAD;
+            float gy = (imu.gyr.y / GYR_LSB) * DEG2RAD;
+            float gz = (imu.gyr.z / GYR_LSB) * DEG2RAD;
+            constexpr float LSB2UT = 0.0625f;
+            if (bmm150_aux_mag_data(imu.aux_data, &mag, &bmm) == BMM150_OK) {
+            mag_uT[0] = mag.x * LSB2UT;
+            mag_uT[1] = mag.y * LSB2UT;
+            mag_uT[2] = mag.z * LSB2UT;
+            }
+
+            uint64_t now_us = esp_timer_get_time();
+            static uint64_t prev_us = now_us;
+            float dt = (now_us - prev_us) * 1e-6f;
+            prev_us = now_us;
+                        
+            
+
+
+            // 2) 更新四元数（9 轴）
+        FusionVector gyro = {.axis = {gx,  gy,  gz}};
+        FusionVector acc  = {.axis = {ax,    ay,    az}};
+        FusionVector mag1  = {.axis = {mag_uT[0],   mag_uT[1],   mag_uT[2]}};
+        FusionAhrsUpdate(&ahrs, gyro, acc, mag1, dt);
+
+                imuBuf[wrIdx] = { imu.acc.x/ACC_LSB,
+                        imu.acc.y/ACC_LSB,
+                        imu.acc.z/ACC_LSB,
+                        gx, gy, gz,
+                        now_us };
+        wrIdx = (wrIdx + 1) % IMU_BUF_LEN;
+ 
+        
+
+
+            // 3) 取俯仰角
+            FusionEuler e = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
+
+                        /* ---------- 计数 & 分类核心 ---------- */
+            constexpr float GYR_TH   = 12.5f * DEG2RAD;   // 上升 / 下降阈值
+            constexpr float GYR_HYST =  2.5f * DEG2RAD;   // 静止滞环
+            static uint64_t cycle_start_us = 0;           // 回合开始时间
+                        /* ---- 本 rep 的临时统计量（static 保存在多次循环之间） ---- */
+            static float     peak_gyr_y   = 0.0f;    // |gy| 峰值
+            static float     sum_gyr_y    = 0.0f;    // |gy| 积分
+            static uint32_t  sample_cnt   = 0;       // 计数
+            static float     peak_acc_mag = 0.0f;    // √(ax²+ay²+az²) 峰值
+            static uint64_t  t_up_us = 0, t_down_us = 0;
+            static uint64_t  t_phase_start = 0;
+
+            /* ---- 低通滤波后的陀螺仪 Y ---- */
+            float gy_raw = (imu.gyr.y / GYR_LSB) * DEG2RAD;
+            static float gy_lp = 0.0f;
+            gy_lp = 0.8f * gy_lp + 0.2f * gy_raw;
+
+            /* 取实时 pitch / roll（°）*/
+            FusionEuler eu = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
+            float pitch = eu.angle.pitch;
+            float roll  = eu.angle.roll;
+            
+                        /* feed RMS 缓冲 —— 放在采样更新最底部 */
+            static float win_omega2[50];              // 0.5 s 窗口（100 Hz）
+            static int   win_pos = 0;
+
+            win_omega2[win_pos] = gy_raw*gy_raw;      // 原始 Y 轴角速度平方
+            win_pos = (win_pos + 1) % 50;
+
+            float sum = 0;
+            for (float v : win_omega2) sum += v;
+            rms_omega_y = sqrtf(sum / 50) / DEG2RAD;  // 转回 °/s
+            /* ---- 计算实时 RMS 平滑度 —— */
+
+            /* ---- 本次采样的加速度模长 ---- */
+            float acc_mag = sqrtf(ax*ax + ay*ay + az*az);   // ★★★ NEW
+        
+            /* ------------ 四状态机 ------------- */
+            switch (phase) {
+            case PHASE_IDLE:
+                if (gy_lp > GYR_TH) {                    // 开始上举
+                    phase = PHASE_UP;
+                    pMax = pMin = pitch;                 // 清极值
+                    rMax = rMin = roll ;
+                    cycle_start_us = now_us;                    // 复位计时
+                    t_phase_start = now_us;
+                    peak_gyr_y = fabsf(gy_raw);
+
+                                        /* ★★★ NEW: 清零统计量 */
+                    peak_gyr_y   = fabsf(gy_raw);
+                    sum_gyr_y    = fabsf(gy_raw);
+                    sample_cnt   = 1;
+                    peak_acc_mag = acc_mag;
+                }
+                break;
+
+            case PHASE_UP:
+                pMax = std::max(pMax, pitch);
+                pMin = std::min(pMin, pitch);
+                rMax = std::max(rMax, roll );
+                rMin = std::min(rMin, roll );
+                            /* ★★★ NEW: 累积统计 */
+                peak_gyr_y   = std::max(peak_gyr_y, fabsf(gy_raw));
+                sum_gyr_y   += fabsf(gy_raw);
+                peak_acc_mag = std::max(peak_acc_mag, acc_mag);
+                ++sample_cnt;
+                if (fabsf(gy_lp) < GYR_HYST){             // 到顶
+                    phase = PHASE_TOP;
+                    t_up_us = now_us - t_phase_start;
+                }
+                break;
+
+            case PHASE_TOP:
+                if (gy_lp < -GYR_TH){                     // 开始下降
+                    phase = PHASE_DOWN;
+                    t_phase_start = now_us;
+            }
+                break;
+
+            case PHASE_DOWN:
+                pMax = std::max(pMax, pitch);
+                pMin = std::min(pMin, pitch);
+                rMax = std::max(rMax, roll );
+                rMin = std::min(rMin, roll );
+                                /* ★★★ NEW: 累积统计 */
+                peak_gyr_y   = std::max(peak_gyr_y, fabsf(gy_raw));
+                sum_gyr_y   += fabsf(gy_raw);
+                peak_acc_mag = std::max(peak_acc_mag, acc_mag);
+                ++sample_cnt;
+                if (fabsf(gy_lp) < GYR_HYST) {           // 动作完成
+                    float dP = pMax - pMin;
+                    float dR = rMax - rMin;
+                    t_down_us = now_us - t_phase_start;
+                    rep_cnt++;
+                    
+                    uint64_t rep_us   = now_us - cycle_start_us;   // 本次用时
+                    Exercise cur_exercise =EX_UNKNOWN;
+
+                                /* ================= 生成 7 维特征 ================= */
+                    float repDur_s = (now_us - cycle_start_us) * 1e-6f;               // rep 总时长
+                    float tempo    = repDur_s;                                        // 你训练里若是 up/down 比例可改
+
+                    float avgGyro  = (sample_cnt ? sum_gyr_y / sample_cnt : 0.0f);    // 平均 |gy|
+                                    /* ------- 你原来的结束状态里，计算好每回合的统计量 -------- */
+                    float romPitch  = dP;                  // 俯仰范围  (°)
+                    float romRoll   = dR;                  // 滚转范围  (°)
+                    float smooth    = rms_omega_y;         // 抖动指标(°/s)
+                    float maxAcc    = peak_acc_mag;             // 例：回合峰值加速度(g)
+                    float repDur    = repDur_s;                // 如果训练用了同一项可重复
+
+                    float features[7] = {
+                        romPitch,
+                        romRoll,
+                        tempo,
+                        smooth,
+                        avgGyro,
+                        maxAcc,
+                        repDur
+                    };
+
+                                        /* ------- 调用模型 -------- */
+                    float score = repModel.predict(features);   // 返回的就是训练脚本里的 y
+
+                    /* 你愿意的话再映射到 0–100 或做平滑 */
+                    score = std::clamp(score, 0.f, 100.f);
+
+                    /* 保存最近 N 次得分做滑动平均 */
+                    static constexpr int N = 5;
+                    static float score_hist[N] = {0};
+                    static int   sh_idx = 0;
+
+                    score_hist[sh_idx] = score;
+                    sh_idx = (sh_idx + 1) % N;
+
+                    float avg = 0;
+                    for (int i=0;i<N;++i) avg += score_hist[i];
+                    avg /= N;
+
+                    ESP_LOGI("FIT",
+                            "Rep=%d  act=%d  ΔP=%.1f  ΔR=%.1f  t=%.2f s  score=%.1f  avg=%.1f",
+                            rep_cnt, cur_exercise, dP, dR, rep_us/1e6f, score, avg);
+
+                    phase = PHASE_IDLE;
+                }
+                break;
+            }
+
+
+
+            /* ④ —— 欧拉角 & 原始 9 轴同时打印 —— */
+            static uint64_t lastPrint = 0;
+            if (now_us - lastPrint > 200000) {          // 200 ms 一次
+                lastPrint = now_us;
+                FusionEuler eu = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
+                float yaw   = eu.angle.yaw;
+                float pitch = eu.angle.pitch;
+                float roll  = eu.angle.roll;
+
+                ESP_LOGI("9DOF",
+                        "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
+                        "ACC[g]=%.3f,%.3f,%.3f  "
+                        "GYR[dps]=%.1f,%.1f,%.1f  "
+                        "MAG[uT]=%.1f,%.1f,%.1f", 
+                        yaw, pitch, roll,
+                        imu.acc.x/ACC_LSB, imu.acc.y/ACC_LSB, imu.acc.z/ACC_LSB,
+                        gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
+                        mag_uT[0], mag_uT[1], mag_uT[2]);
+            }
+
 
             /* ====== ② 仍然打印日志 ====== */
             if (bmm150_aux_mag_data(imu.aux_data, &mag, &bmm) == BMM150_OK) {
@@ -334,13 +604,6 @@ void Application::imu_task(void*)
                 mag_uT[0] = mag.x * LSB2UT;
                 mag_uT[1] = mag.y * LSB2UT;
                 mag_uT[2] = mag.z * LSB2UT;
-
-            //     ESP_LOGI("IMU",
-            //              "G(%d,%d,%d)  A(%d,%d,%d)  M(%.2f,%.2f,%.2f)",
-            //              imu.gyr.x, imu.gyr.y, imu.gyr.z,
-            //              imu.acc.x, imu.acc.y, imu.acc.z,
-            //              mag_uT[0], mag_uT[1], mag_uT[2]);
-
                 if (s_magQueue){
                     /* 直接写 3 * float, 注意长度要与队列创建时一致 */
                     xQueueOverwrite(s_magQueue, mag_uT);
@@ -349,7 +612,7 @@ void Application::imu_task(void*)
             
 
         }
-        vTaskDelay(pdMS_TO_TICKS(100));      // 50 Hz = 20 ms
+        vTaskDelay(pdMS_TO_TICKS(10));      // 
     }
 }
 
@@ -743,15 +1006,15 @@ void Application::Start() {
         for (int i = 0; i < n; ++i) {
             ESP_LOGI(TAG, "  - 0x%02X", addrs[i]);
         }
-
         init_sensors();
         xTaskCreatePinnedToCore(Application::imu_task,
                         "imu_task",
                         4096,
-                        nullptr,
+                        this,
                         4,          // LVGL 默认 5，IMU 设 4 就不会饿死 GUI
                         nullptr,
                         1);         // pin 到 Core 1
+                        
 
         imu_initialized_ = true;
 
@@ -814,6 +1077,32 @@ void Application::Start() {
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
+
+    websocket_server_start();               // ★ 启本地 WS 服务器
+
+        /*************** mDNS 初始化 & 注册 ****************/
+    {
+        /* 1) 初始化 mDNS 模块 */
+        ESP_ERROR_CHECK(mdns_init());
+
+        /* 2) 设置主机名（smartdumbbell-XXXX）*/
+        std::string mac = SystemInfo::GetMacAddress();          // "AA:BB:CC:DD:EE:FF"
+        std::string shortMac = mac.substr(mac.length() - 2*2);  // "EEFF"  末尾 4 个十六进制字符
+
+        char hostname[32];
+        snprintf(hostname, sizeof(hostname), "smartdumbbell-%s", shortMac.c_str());
+        // → "smartdumbbell-EEFF"
+        mdns_hostname_set(hostname);
+
+
+        /* 3) 设置实例名（手机看到的名称，可自定义）*/
+        mdns_instance_name_set("SmartDumbbell");
+
+        /* 4) 向局域网发布一个 UDP 服务，端口 12345 可换成你实际监听的端口 */
+        ESP_ERROR_CHECK(mdns_service_add(NULL, "_smartdumbbell", "_tcp", 8080, NULL, 0));
+
+
+    }
 
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
@@ -1400,27 +1689,6 @@ void Application::SetDeviceState(DeviceState state) {
     }
 }
 
-
-// void Application::EnterDeepSleep()
-// {
-//     ESP_LOGI(TAG, "Preparing peripherals for deep-sleep…");
-
-//     auto& board = Board::GetInstance();
-//     //board.PrepareForDeepSleep();          当前未实现，暂时先注释
-
-//     // 触摸中断引脚（RTC capable）；请替换成实际 GPIO 号     
-//     constexpr gpio_num_t TOUCH_INT_GPIO = GPIO_NUM_7;
-
-//     // 关闭一切旧唤醒源，启用触摸作为 EXT1 唤醒
-//     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-//     esp_sleep_enable_ext1_wakeup(1ULL << TOUCH_INT_GPIO,
-//                                  ESP_EXT1_WAKEUP_ANY_HIGH);
-
-//     ESP_LOGI(TAG, "Entering deep-sleep now");
-//     esp_deep_sleep_start();               // 不返回
-// }
-
-
 bmi2_dev* Application::GetBmiDev() { return &bmi; }
 bmm150_dev* Application::GetBmmDev() { return &bmm; }  //暴露IMU接口
 
@@ -1556,3 +1824,7 @@ void Application::SetAecMode(AecMode mode) {
         }
     });
 }
+
+
+
+

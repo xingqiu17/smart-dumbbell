@@ -58,6 +58,21 @@ struct bmi2_sens_data;
 struct bmi2_dev;
 struct bmm150_dev;
 
+/* —— 简易动作分类 —— */
+enum Exercise {
+    EX_UNKNOWN,
+    EX_CURL,           // 弯举
+    EX_LATERAL_RAISE,  // 侧平举
+    EX_SHOULDER_PRESS, // 过头推
+    EX_BENT_ROW,       // 俯身划船
+    EX_TRICEPS_KB,      // 三头肌臂屈伸
+    EX_SNATCH_HIGH_PULL,// 爆发上拉
+    EX_WRIST_CURL,         // 手腕卷
+    EX_BENT_OVER_ROW,      // 俯身划船
+    EX_TWIST_TORSO        // 俄式转体
+};
+
+
 class Application {
 public:
     static Application& GetInstance() {
@@ -94,6 +109,8 @@ public:
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
+
+    
 
 private:
     Application();
@@ -145,6 +162,8 @@ private:
     OpusResampler reference_resampler_;
     OpusResampler output_resampler_;
 
+        
+    
 
     static void init_i2c();
     static void init_sensors();
@@ -164,7 +183,9 @@ private:
     void ExitAudioTestingMode();
     // void EnterDeepSleep();  // 进入深度睡眠模式
     void EnterLightSleep();  // 进入浅睡眠模式
-
+    void classify_and_count();
+    static float score_rep(Exercise type, float dP, float dR, uint64_t dt_us);
+    static Exercise classify_rep(const float v_base[3],float dPitch, float dRoll,float rms_omega);
 };
 
 #endif // _APPLICATION_H_
