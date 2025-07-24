@@ -24,6 +24,9 @@
 #include "wake_word.h"
 #include "audio_debugger.h"
 #include "settings.h"
+#pragma once
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #define SCHEDULE_EVENT (1 << 0)
 #define SEND_AUDIO_EVENT (1 << 1)
@@ -55,21 +58,22 @@ enum DeviceState {
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
 
 
+
+
+
 struct bmi2_sens_data; 
 struct bmi2_dev;
 struct bmm150_dev;
 
 class Application {
 public:
-    static Application& GetInstance() {
-        static Application instance;
-        return instance;
-    }
+
     // 删除拷贝构造函数和赋值运算符
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
 
 
+    static Application& GetInstance();
     static void imu_stat_task(void* arg);
     static bmi2_dev* GetBmiDev();
     static bmm150_dev* GetBmmDev();
@@ -96,6 +100,20 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
     Settings& GetPairingSettings() { return *pairing_settings_;}
+    /* ────────────────────────── 新增 ────────────────────────── */
+    /** JSON 消息队列，存 strdup() 出来的 char* */
+    static QueueHandle_t s_jsonQueue;
+
+    /** ws_handler 会调用，把接收到的 JSON char* 推入这里 */
+    static QueueHandle_t GetJsonQueue();
+
+    /** 启动后台消费任务时的入口函数 */
+    static void MessageProcessingTask(void* pv);
+
+    /** 真正解析并分发 start_training JSON 的函数 */
+    void handleStartTrainingJson(char* json);
+    /* ────────────────────────── 新增 End ────────────────────────── */
+
 
     
 

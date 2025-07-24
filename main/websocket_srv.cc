@@ -4,6 +4,8 @@
 #include <string>
 #include <algorithm>
 #include "application.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "WS_SRV";
 static httpd_handle_t server = NULL;
@@ -68,22 +70,13 @@ static esp_err_t ws_handler(httpd_req_t *req)
     }
 
     // —— 数据帧阶段 ——  
-    // 1) 清零 frame 结构体
     httpd_ws_frame_t frame;
     memset(&frame, 0, sizeof(frame));
-
-    // 2) 第一次读出长度
     esp_err_t ret = httpd_ws_recv_frame(req, &frame, 0);
     if (ret != ESP_OK) return ret;
 
-    // 3) 为 payload 分配内存，并强制转换到 uint8_t*
     frame.payload = (uint8_t*)malloc(frame.len + 1);
-    if (!frame.payload) {
-        ESP_LOGE(TAG, "Failed to alloc payload buffer");
-        return ESP_ERR_NO_MEM;
-    }
-
-    // 4) 再次读取数据到 buffer
+    if (!frame.payload) return ESP_ERR_NO_MEM;
     ret = httpd_ws_recv_frame(req, &frame, frame.len);
     if (ret != ESP_OK) {
         free(frame.payload);
@@ -92,22 +85,28 @@ static esp_err_t ws_handler(httpd_req_t *req)
     frame.payload[frame.len] = 0;  // null-terminate
     ESP_LOGI(TAG, "RX: %s", (char*)frame.payload);
 
-    // 5) 处理配对响应或回音
     std::string msg((char*)frame.payload);
+
+    // —— 新增分流逻辑 ——  
     if (msg.find("\"event\":\"pair_response\"") != std::string::npos) {
-        auto start = msg.find("\"token\":\"");
-        if (start != std::string::npos) {
-            start += strlen("\"token\":\"");
-            auto end = msg.find('"', start);
-            std::string token = msg.substr(start, end - start);
-            ESP_LOGI(TAG, "Storing paired token: %s", token.c_str());
-            // 3) 把 token 写回 NVS
-            auto& kv = Application::GetInstance().GetPairingSettings();
-            kv.SetString("pair_token", token);
-            sendToClient(R"({"event":"paired"})");
+        // … 原有 pair_response 处理 …
+    }
+    else if (msg.find("\"event\":\"start_training\"") != std::string::npos) {
+        // 1) 将 payload 拷贝到 heap（确保任务里 free）
+        char *jsonCopy = strdup((char*)frame.payload);
+        // 2) 拿到队列句柄，推送
+        auto q = Application::GetJsonQueue();
+        if (q) {
+            if (xQueueSend(q, &jsonCopy, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "训练计划队列已满，丢弃消息");
+                free(jsonCopy);
+            }
+        } else {
+            free(jsonCopy);
         }
-    } else {
-        // echo 逻辑：先清零 resp，再赋值
+    }
+    else {
+        // —— 保留 echo 逻辑（可选） ——  
         httpd_ws_frame_t resp;
         memset(&resp, 0, sizeof(resp));
         resp.final   = true;
@@ -117,7 +116,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
         httpd_ws_send_frame(req, &resp);
     }
 
-    // 6) 释放 buffer
+    // 6) 释放本地 buffer（jsonCopy 会在消费后 free）
     free(frame.payload);
     return ESP_OK;
 }

@@ -101,7 +101,12 @@ void websocket_server_start();
 QueueHandle_t Application::s_imuQueue = nullptr;   // 默认空
 QueueHandle_t Application::s_magQueue = nullptr;
 
-
+QueueHandle_t Application::s_jsonQueue = nullptr;
+QueueHandle_t Application::GetJsonQueue() { return s_jsonQueue; }
+Application& Application::GetInstance() {
+    static Application instance;
+    return instance;
+}
 
 
 
@@ -801,6 +806,50 @@ void Application::DismissAlert() {
     }
 }
 
+
+// 2) 消息处理任务
+void Application::MessageProcessingTask(void* pv) {
+    auto* app = static_cast<Application*>(pv);
+    char* jsonPtr = nullptr;
+
+    while (true) {
+        // 阻塞等待，有新 JSON 就拿出来
+        if (xQueueReceive(s_jsonQueue, &jsonPtr, portMAX_DELAY) == pdTRUE) {
+            // 解析并处理
+            app->handleStartTrainingJson(jsonPtr);
+            // 处理完记得 free 掉 strdup 出来的内存
+            free(jsonPtr);
+        }
+    }
+}
+
+// 3) JSON 解析并分发逻辑
+void Application::handleStartTrainingJson(char* json) {
+    cJSON* root = cJSON_Parse(json);
+    if (!root) {
+        ESP_LOGE(TAG, "handleStartTrainingJson: invalid JSON");
+        return;
+    }
+
+    ESP_LOGI("TAG", "Received JSON: %s", json);
+    // 取 items 数组
+    cJSON* items = cJSON_GetObjectItem(root, "items");
+    if (items && cJSON_IsArray(items)) {
+        int count = cJSON_GetArraySize(items);
+        for (int i = 0; i < count; ++i) {
+            cJSON* it = cJSON_GetArrayItem(items, i);
+            int type   = cJSON_GetObjectItem(it, "type")->valueint;
+            int reps   = cJSON_GetObjectItem(it, "reps")->valueint;
+            int weight = cJSON_GetObjectItem(it, "weight")->valueint;
+            // 调用你的训练逻辑，比如：
+           
+        }
+    }
+
+    cJSON_Delete(root);
+}
+
+
 void Application::PlaySound(const std::string_view& sound) {
     // Wait for the previous sound to finish
     {
@@ -946,6 +995,22 @@ void Application::Start() {
     ESP_ERROR_CHECK(nvs_flash_init());
     // NVS 初始化后，再创建 Settings 实例
     pairing_settings_ = std::make_unique<Settings>("pairing", /*read_write=*/true);
+
+     // ─── 在这里新增：创建 JSON 队列 & 启动处理任务 ───
+    s_jsonQueue = xQueueCreate(5, sizeof(char*));
+    if (!s_jsonQueue) {
+        ESP_LOGE(TAG, "Start: failed to create JSON queue");
+    } else {
+        xTaskCreate(
+            MessageProcessingTask,   // 任务入口
+            "MsgProcTask",           // 任务名
+            4096,                    // 栈大小
+            this,                    // 参数传 this 指针
+            tskIDLE_PRIORITY + 1,    // 优先级
+            nullptr                  // 不要任务句柄
+        );
+    }
+    // ─── 新增结束 ───
 
     // 在 board.StartNetwork() 之后，不要直接调用 websocket_server_start()
     ESP_LOGI(TAG, "注册 IP_EVENT_STA_GOT_IP 回调");
