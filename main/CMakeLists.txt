@@ -27,7 +27,7 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "FusionCompass.c"
             "FusionOffset.c"
 <<<<<<< HEAD
-            "websocket_srv.c"
+           
 =======
             "websocket_srv.cc"
 >>>>>>> master
