@@ -89,7 +89,6 @@ public:
 
 
     static Application& GetInstance();
-    static void imu_stat_task(void* arg);
     static bmi2_dev* GetBmiDev();
     static bmm150_dev* GetBmmDev();
     bool GetLatestImu(bmi2_sens_data& out);/** 取出“最近一次”IMU 原始数据（若队列为空返回 false） */

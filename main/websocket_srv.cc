@@ -28,7 +28,7 @@ static std::string parseQueryParam(const std::string &uri, const std::string &ke
 }
 
 // 发送 JSON（text）到已保存的 client fd
-static esp_err_t sendToClient(const char *json) {
+esp_err_t sendToClient(const char *json) {
     if (s_ws_fd < 0) return ESP_FAIL;
     httpd_ws_frame_t frame;
     memset(&frame, 0, sizeof(frame));
@@ -91,6 +91,10 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (msg.find("\"event\":\"pair_response\"") != std::string::npos) {
         // … 原有 pair_response 处理 …
     }
+    else if (msg.find("\"event\":\"setUser\"") != std::string::npos) {
+       // 直接调用 bind 处理函数，或者推入队列，确保 handleStartTrainingJson 能看到它
+       Application::GetInstance().handleStartTrainingJson((char*)frame.payload);
+   }
     else if (msg.find("\"event\":\"start_training\"") != std::string::npos) {
         // 1) 将 payload 拷贝到 heap（确保任务里 free）
         char *jsonCopy = strdup((char*)frame.payload);

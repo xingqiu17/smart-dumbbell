@@ -261,6 +261,7 @@ public:
     void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
+    void SetCurrentUserId(int uid) { current_user_id_ = uid; }
 
 private:
     McpServer();
@@ -276,6 +277,7 @@ private:
 
     std::vector<McpTool*> tools_;
     std::thread tool_call_thread_;
+    int current_user_id_ = 0;
 };
 
 #endif // MCP_SERVER_H

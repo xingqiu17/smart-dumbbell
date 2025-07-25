@@ -16,6 +16,7 @@
 #include "bmi2.h"
 #include "bmi270.h"
 #include "bmm150.h"
+#include "remote_data_service.h"
 
 #define TAG "MCP"
 
@@ -37,7 +38,18 @@ void McpServer::AddCommonTools() {
     // Backup the original tools list and restore it after adding the common tools.
     auto original_tools = std::move(tools_);
     auto& board = Board::GetInstance();
-    auto& app = Application::GetInstance();  //用于获取IMU信息
+
+
+
+    // 获取用户数据工具
+    AddTool("self.user.get_data",
+        "When the user asks for user-related data, use this tool to reply including gender, height, weight, birthday, and current training weight data.",
+        PropertyList({ Property("userId", kPropertyTypeInteger) }),
+        [this](const PropertyList&) -> ReturnValue {
+            int uid = this->current_user_id_;
+            ESP_LOGI(TAG, "Tool self.user.get_data using stored userId=%d", uid);
+            return RemoteDataService::GetInstance().GetUserDataJson(uid);
+        });
 
     //获取状态工具
     AddTool("self.get_device_status",
@@ -111,38 +123,7 @@ void McpServer::AddCommonTools() {
     }
 
 
-    AddTool("self.imu.get_latest",
-        // == 描述 ==
-        // Return the most recent 9-DoF sample from BMI270/BMM150 as JSON.
-        // If no fresh data is available return success=false.
-        "Return the most recent IMU sample (acc, gyr, mag) as JSON.\n"
-        "No arguments required.",
-        PropertyList(),   // 无参数
-        [&app](const PropertyList&) -> ReturnValue {
-
-            bmi2_sens_data imu{};
-            float          mag[3];
-
-            /* 队列里是否都有新数据？            */
-            bool ok_imu = app.GetLatestImu(imu);
-            bool ok_mag = app.GetLatestMag(mag);
-
-            if (!(ok_imu && ok_mag))              // 任何一个没取到就算失败
-                return R"({"success":false,"message":"no_new_sample"})";
-
-            /* —— 拼 JSON —— */
-            char buf[320];
-            snprintf(buf, sizeof(buf),
-                    R"({"success":true,)"
-                    R"("acc":{"x":%d,"y":%d,"z":%d},)"
-                    R"("gyr":{"x":%d,"y":%d,"z":%d},)"
-                    R"("mag":{"x":%.2f,"y":%.2f,"z":%.2f}})",
-                    imu.acc.x, imu.acc.y, imu.acc.z,
-                    imu.gyr.x, imu.gyr.y, imu.gyr.z,
-                    mag[0], mag[1], mag[2]);
-
-            return std::string(buf);
-    });
+    
 
     
 

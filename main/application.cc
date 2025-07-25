@@ -23,6 +23,9 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "settings.h"
+#include "remote_data_service.h" 
+#include "websocket_srv.h" 
+
 
 extern "C" {
 #include "FusionAhrs.h"
@@ -325,62 +328,6 @@ bool Application::GetLatestMag(float out[3])
 }
 
 
-void Application::imu_stat_task(void* arg)
-{
-    auto* self = static_cast<Application*>(arg);
-
-    /* 预先声明缓冲区 */
-    bmi2_sens_data imu{};
-    float mag[3]{};
-
-    while (true) {
-        /* ---------- 1) 初始化极值 ---------- */
-        int16_t acc_min[3] {  INT16_MAX,  INT16_MAX,  INT16_MAX };
-        int16_t acc_max[3] {  INT16_MIN,  INT16_MIN,  INT16_MIN };
-        int16_t gyr_min[3] {  INT16_MAX,  INT16_MAX,  INT16_MAX };
-        int16_t gyr_max[3] {  INT16_MIN,  INT16_MIN,  INT16_MIN };
-        float   mag_min[3] {  std::numeric_limits<float>::max(),
-                              std::numeric_limits<float>::max(),
-                              std::numeric_limits<float>::max() };
-        float   mag_max[3] { -std::numeric_limits<float>::max(),
-                             -std::numeric_limits<float>::max(),
-                             -std::numeric_limits<float>::max() };
-
-        /* ---------- 2) 在 5 s 窗口内循环采样 ---------- */
-        const TickType_t t_start = xTaskGetTickCount();
-        while (xTaskGetTickCount() - t_start < pdMS_TO_TICKS(5000))
-        {
-            /* a) 取 IMU 加速度 / 陀螺仪 */
-            if (self->GetLatestImu(imu)) {
-                /* 加速度 (acc.x/y/z) */
-                acc_min[0] = std::min(acc_min[0], imu.acc.x);
-                acc_max[0] = std::max(acc_max[0], imu.acc.x);
-                acc_min[1] = std::min(acc_min[1], imu.acc.y);
-                acc_max[1] = std::max(acc_max[1], imu.acc.y);
-                acc_min[2] = std::min(acc_min[2], imu.acc.z);
-                acc_max[2] = std::max(acc_max[2], imu.acc.z);
-                /* 陀螺仪 (gyr.x/y/z) */
-                gyr_min[0] = std::min(gyr_min[0], imu.gyr.x);
-                gyr_max[0] = std::max(gyr_max[0], imu.gyr.x);
-                gyr_min[1] = std::min(gyr_min[1], imu.gyr.y);
-                gyr_max[1] = std::max(gyr_max[1], imu.gyr.y);
-                gyr_min[2] = std::min(gyr_min[2], imu.gyr.z);
-                gyr_max[2] = std::max(gyr_max[2], imu.gyr.z);
-            }
-
-            /* b) 取磁力计 (micro-Tesla) */
-            if (self->GetLatestMag(mag)) {
-                for (int i = 0; i < 3; ++i) {
-                    mag_min[i] = std::min(mag_min[i], mag[i]);
-                    mag_max[i] = std::max(mag_max[i], mag[i]);
-                }
-            }
-            /* 每 10 ms 轮询一次就够快，50 Hz 采样不会漏太多峰值 */
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-
-    }
-}
 
 
 void Application::imu_task(void* arg)
@@ -602,15 +549,15 @@ void Application::imu_task(void* arg)
                 float pitch = eu.angle.pitch;
                 float roll  = eu.angle.roll;
 
-                ESP_LOGI("9DOF",
-                        "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
-                        "ACC[g]=%.3f,%.3f,%.3f  "
-                        "GYR[dps]=%.1f,%.1f,%.1f  "
-                        "MAG[uT]=%.1f,%.1f,%.1f", 
-                        yaw, pitch, roll,
-                        imu.acc.x/ACC_LSB, imu.acc.y/ACC_LSB, imu.acc.z/ACC_LSB,
-                        gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
-                        mag_uT[0], mag_uT[1], mag_uT[2]);
+                // ESP_LOGI("9DOF",
+                //         "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
+                //         "ACC[g]=%.3f,%.3f,%.3f  "
+                //         "GYR[dps]=%.1f,%.1f,%.1f  "
+                //         "MAG[uT]=%.1f,%.1f,%.1f", 
+                //         yaw, pitch, roll,
+                //         imu.acc.x/ACC_LSB, imu.acc.y/ACC_LSB, imu.acc.z/ACC_LSB,
+                //         gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
+                //         mag_uT[0], mag_uT[1], mag_uT[2]);
             }
 
 
@@ -909,25 +856,47 @@ void Application::MessageProcessingTask(void* pv) {
 }
 
 // 3) JSON 解析并分发逻辑
-void Application::handleStartTrainingJson(char* json) {
+void Application::handleStartTrainingJson(char* json)
+{
     cJSON* root = cJSON_Parse(json);
     if (!root) {
-        ESP_LOGE(TAG, "handleStartTrainingJson: invalid JSON");
+        ESP_LOGE(TAG, "invalid JSON: %s", json);
+        return;
+    }
+    /* ---------- A. 处理 setUser ---------- */
+    const cJSON* event = cJSON_GetObjectItemCaseSensitive(root, "event");
+    if (cJSON_IsString(event) && strcmp(event->valuestring, "setUser") == 0) {
+        int uid = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "userId"));
+
+        if (uid > 0) {
+            RemoteDataService::GetInstance().SetCurrentUserId(uid);
+
+            // ② 直接用已有的 sendToClient 发送确认
+            sendToClient(R"({"success":true,"event":"user_bound"})");
+            ESP_LOGI(TAG, "Bound userId=%d", uid);
+            McpServer::GetInstance().SetCurrentUserId(uid);
+        }
+        cJSON_Delete(root);
         return;
     }
 
-    ESP_LOGI("TAG", "Received JSON: %s", json);
-    // 取 items 数组
+    /* ---------- B. 处理训练计划 ---------- */
     cJSON* items = cJSON_GetObjectItem(root, "items");
     if (items && cJSON_IsArray(items)) {
+
+
+
         int count = cJSON_GetArraySize(items);
         for (int i = 0; i < count; ++i) {
             cJSON* it = cJSON_GetArrayItem(items, i);
             int type   = cJSON_GetObjectItem(it, "type")->valueint;
             int reps   = cJSON_GetObjectItem(it, "reps")->valueint;
             int weight = cJSON_GetObjectItem(it, "weight")->valueint;
-            // 调用你的训练逻辑，比如：
-           
+
+            // TODO: 调用你的训练逻辑，例如：
+            // StartTrainingItem(sets, type, reps, weight);
+            ESP_LOGI(TAG, "[%d]  type=%d reps=%d weight=%d",
+                     i, type, reps, weight);
         }
     }
 
@@ -1137,13 +1106,7 @@ void Application::Start() {
 
         imu_initialized_ = true;
 
-        xTaskCreatePinnedToCore(Application::imu_stat_task,
-                        "imu_stat_task",
-                        4096,
-                        this,     /* 传递 this 指针 */
-                        3,        /* 优先级 < imu_task */
-                        nullptr,
-                        1);
+
     }
 
 
