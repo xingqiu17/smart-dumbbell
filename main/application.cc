@@ -23,17 +23,60 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "settings.h"
-#include "remote_data_service.h" 
-#include "websocket_srv.h" 
-
+#include "websocket_srv.h"
 
 extern "C" {
 #include "FusionAhrs.h"
 #include "FusionMath.h"
 #include "rep_scorer.h"
+//#include "rep_scorer_30DBP.h"
+// #include "rep_scorer_45DBP.h"
+// #include "rep_scorer_DLR.h"
+//#include "rep_scorer_IDBC.h"
+//#include "rep_scorer_AIDBC.h"
+//#include "rep_scorer_DSP.h"
 }
 
-static Eloquent::ML::Port::RandomForestRegressor repModel; // 模型
+static Eloquent::ML::Port::RandomForestRegressor_DWC repModel_DWC; // 模型
+//static Eloquent::ML::Port::RandomForestRegressor_30DBP repModel_30DBP; // 模型
+// static Eloquent::ML::Port::RandomForestRegressor_45DBP repModel_45DBP; // 模型
+// static Eloquent::ML::Port::RandomForestRegressor_DLR repModel_DLR; // 模型
+//static Eloquent::ML::Port::RandomForestRegressor_IDBC repModel_IDBC; // 模型
+//static Eloquent::ML::Port::RandomForestRegressor_AIDBC repModel_AIDBC; // 模型
+//static Eloquent::ML::Port::RandomForestRegressor_DSP repModel_DSP; // 模型
+
+enum Axis {
+    AXIS_X = 0,
+    AXIS_Y = 1,
+    AXIS_Z = 2
+};
+
+/* ====================  动作配置表  ==================== */
+struct RepAlgoCfg {
+    /* 计数—阈值及轴向 */
+    float gyr_th;          // 开始/结束阈值 (rad/s)
+    float gyr_hyst;        // 静止滞环     (rad/s)
+    int   axis;            // 计数用哪根陀螺轴：0=X 1=Y 2=Z
+
+    /* 随机森林模型指针 */
+    const char* model; // 你在 rep_scorer.h 里声明的类
+};
+
+static constexpr float DEG2RAD = 0.0174532925f; // conversion factor from degrees to radians
+
+/* ==== 配表：下标就是 Exercise 枚举 ==== */
+static const RepAlgoCfg kAlgoCfg[] = {
+/* EX_UNKNOWN */ { 0,0,1, nullptr },
+/* EX_AIDBC   */ { 12.5f*DEG2RAD, 2.5f*DEG2RAD, 1, "repModel_DWC" /*占位*/ },
+                 /* …… */
+ /* EX_DWC     */ { 12.5f*DEG2RAD, 2.5f*DEG2RAD, 1, "repModel_DWC" },
+ /* EX_DLR     */ { 10.0f*DEG2RAD, 2.0f*DEG2RAD, 0, "repModel_DLR" },
+ /* EX_DSP     */ { 15.0f*DEG2RAD, 3.0f*DEG2RAD, 2, "repModel_DSP" },
+ /* EX_45DBP   */ { 14.0f*DEG2RAD, 3.0f*DEG2RAD, 2, "repModel_45DBP" },
+ /* EX_IDBC    */ { 12.5f*DEG2RAD, 2.5f*DEG2RAD, 1, "repModel_IDBC" },
+};
+
+
 
 static inline FusionQuaternion QuaternionConjugate(const FusionQuaternion& q)
 {
@@ -49,6 +92,8 @@ static inline FusionQuaternion QuaternionConjugate(const FusionQuaternion& q)
 //new
 float rms_omega_y = 0.0f; // 用于计算平滑度的 Y 轴角速度 RMSb
 
+RepReport rep_report = { EX_UNKNOWN, 0, 0.0f }; // 当前动作计数报告
+
 
 //new
 
@@ -58,10 +103,8 @@ static bool ws_started = false;
 
 /* —— AHRS & 运动识别 —— */
 static FusionAhrs ahrs;               // 全局滤波器
-static bool     ahrs_inited = false;
-
 /***************  头部增加几个静态变量  ***************/
-static constexpr float DEG2RAD = 0.0174532925f; // conversion factor from degrees to radians
+
 
 
 /* ---------- 动作计数用四状态机 ---------- */
@@ -69,7 +112,7 @@ enum Phase { PHASE_IDLE, PHASE_UP, PHASE_TOP, PHASE_DOWN };
 static Phase phase = PHASE_IDLE;
 static float pMax, pMin, rMax, rMin;
 static int rep_cnt=0;
-
+bool is_rep_counting = false; // 是否正在计数
 
 
 // application.cc 里（建议在最前面 IMU 相关静态变量附近）
@@ -82,8 +125,6 @@ struct ImuFrame {
 static constexpr size_t IMU_BUF_LEN = 128;     // 100 Hz 采样 ≈1.28 s
 static ImuFrame imuBuf[IMU_BUF_LEN];
 static size_t   wrIdx   = 0;                   // 写指针
-static bool     inSlice = false;               // “正在动作片段” 标志
-                  // 写指针
 
 
 
@@ -124,6 +165,24 @@ Application& Application::GetInstance() {
 }
 
 
+void send_rep_json(const RepReport& rp)
+{
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "event", "rep_data");
+    cJSON_AddNumberToObject(root, "exercise", rp.ex);
+    cJSON_AddNumberToObject(root, "rep",      rp.rep_idx);
+    cJSON_AddNumberToObject(root, "score",    rp.score);
+
+    char* msg = cJSON_PrintUnformatted(root);      // 动态分配
+    esp_err_t err = sendToClient(msg);                // 你 websocket 的封装
+    if(err != ESP_OK) {
+        ESP_LOGE(TAG, "发送 rep_data JSON 失败: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "发送 rep_data JSON: %s", msg);
+    }
+    cJSON_free(msg);
+    cJSON_Delete(root);
+}
 
 
 
@@ -327,9 +386,6 @@ bool Application::GetLatestMag(float out[3])
     return xQueueReceive(s_magQueue, out, 0) == pdTRUE;
 }
 
-
-
-
 void Application::imu_task(void* arg)
 {
     bmi2_sens_data imu{};      // 本地缓冲
@@ -337,9 +393,9 @@ void Application::imu_task(void* arg)
     float          mag_uT[3];
 
     while (true)
-    {
+    {   
+        if(is_rep_counting){
         if (bmi2_get_sensor_data(&imu, &bmi) == BMI2_OK) {
-
             /* ====== ① 推进队列 ====== */
             if (s_imuQueue) { xQueueOverwrite(s_imuQueue, &imu); }
                         /* ====== 姿态解算 ====== */
@@ -348,8 +404,6 @@ void Application::imu_task(void* arg)
             constexpr float DEG2RAD = 0.0174532925f;
 
             // 1) 原始计数 -> 物理量
-            /* ① —— 把 acc 转成 m/s² —— */
-            constexpr float G_TO_MS2 = 9.80665f;
             float ax =  imu.acc.x / ACC_LSB ;
             float ay =  imu.acc.y / ACC_LSB ;
             float az =  imu.acc.z / ACC_LSB ;
@@ -388,22 +442,30 @@ void Application::imu_task(void* arg)
 
 
             // 3) 取俯仰角
-            FusionEuler e = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
-
                         /* ---------- 计数 & 分类核心 ---------- */
-            constexpr float GYR_TH   = 12.5f * DEG2RAD;   // 上升 / 下降阈值
-            constexpr float GYR_HYST =  2.5f * DEG2RAD;   // 静止滞环
+            // constexpr float GYR_TH   = 12.5f * DEG2RAD;   
+            // constexpr float GYR_HYST =  2.5f * DEG2RAD;   
             static uint64_t cycle_start_us = 0;           // 回合开始时间
                         /* ---- 本 rep 的临时统计量（static 保存在多次循环之间） ---- */
             static float     peak_gyr_y   = 0.0f;    // |gy| 峰值
             static float     sum_gyr_y    = 0.0f;    // |gy| 积分
             static uint32_t  sample_cnt   = 0;       // 计数
             static float     peak_acc_mag = 0.0f;    // √(ax²+ay²+az²) 峰值
-            static uint64_t  t_up_us = 0, t_down_us = 0;
             static uint64_t  t_phase_start = 0;
 
-            /* ---- 低通滤波后的陀螺仪 Y ---- */
-            float gy_raw = (imu.gyr.y / GYR_LSB) * DEG2RAD;
+            const RepAlgoCfg& cfg = kAlgoCfg[rep_report.ex];
+            const float  GYR_TH   = cfg.gyr_th;// 上升 / 下降阈值
+            const float  GYR_HYST = cfg.gyr_hyst;// 静止滞环
+
+                        /* 选取本次采样做计数的原始角速度 --------- */
+            float gyro_raw_all[3] = {
+                (imu.gyr.x / GYR_LSB) * DEG2RAD,
+                (imu.gyr.y / GYR_LSB) * DEG2RAD,
+                (imu.gyr.z / GYR_LSB) * DEG2RAD
+            };
+            float gy_raw = gyro_raw_all[cfg.axis];
+
+            /* 做一次一阶 LPF */
             static float gy_lp = 0.0f;
             gy_lp = 0.8f * gy_lp + 0.2f * gy_raw;
 
@@ -458,7 +520,6 @@ void Application::imu_task(void* arg)
                 ++sample_cnt;
                 if (fabsf(gy_lp) < GYR_HYST){             // 到顶
                     phase = PHASE_TOP;
-                    t_up_us = now_us - t_phase_start;
                 }
                 break;
 
@@ -482,11 +543,9 @@ void Application::imu_task(void* arg)
                 if (fabsf(gy_lp) < GYR_HYST) {           // 动作完成
                     float dP = pMax - pMin;
                     float dR = rMax - rMin;
-                    t_down_us = now_us - t_phase_start;
-                    rep_cnt++;
+                    rep_cnt++; // 计数
                     
                     uint64_t rep_us   = now_us - cycle_start_us;   // 本次用时
-                    Exercise cur_exercise =EX_UNKNOWN;
 
                                 /* ================= 生成 7 维特征 ================= */
                     float repDur_s = (now_us - cycle_start_us) * 1e-6f;               // rep 总时长
@@ -509,12 +568,53 @@ void Application::imu_task(void* arg)
                         maxAcc,
                         repDur
                     };
-
-                                        /* ------- 调用模型 -------- */
-                    float score = repModel.predict(features);   // 返回的就是训练脚本里的 y
-
+                    float score = 0.0f; // 模型输出分数
+                    int exercise = rep_report.ex; // 当前动作类型
+                    /* ------- 调用模型 -------- */
+                    switch(exercise) {
+                        case EX_DWC: {
+                            score = repModel_DWC.predict(features);   // 返回的就是训练脚本里的 y
+                            break;
+                        }
+                        // case EX_30DBP: {
+                        //     score = repModel_30DBP.predict(features);   // 返回的就是训练脚本里的 y
+                        //     break;
+                        // }
+                        // case EX_45DBP: {
+                        //     score = repModel_45DBP.predict(features);   // 返回的就是训练脚本里的 y
+                        //     break;
+                        // }
+                        // case EX_DLR: {
+                        //     score = repModel_DLR.predict(features);   // 返回的就是训练脚本里的 y
+                        //     break;
+                        // }
+                        // case EX_IDBC: {
+                        //     score = repModel_IDBC.predict(features);   // 返回的就是训练脚本里的 y
+                        //     break;
+                        // }
+                        // case EX_AIDBC: {
+                        //     score = repModel_AIDBC.predict(features);   // 返回的就是训练脚本里的 y
+                        //     break;
+                        // }
+                        // case EX_DSP: {
+                        //     score = repModel_DSP.predict(features);   // 返回的就是训练脚本里的 y
+                        //     break;
+                        // }
+                        default:
+                            ESP_LOGE("FIT", "Unknown exercise type: %d", rep_report.ex);
+                    }
                     /* 你愿意的话再映射到 0–100 或做平滑 */
                     score = std::clamp(score, 0.f, 100.f);
+
+                    if(rep_cnt==rep_report.rep_idx)
+                    is_rep_counting = false; // 计数完成
+                    
+                    /* 生成报告 */
+                    RepReport rp2client;
+                    rp2client.ex       = rep_report.ex;
+                    rp2client.rep_idx  = rep_cnt;
+                    rp2client.score    = score;
+                    send_rep_json(rp2client);
 
                     /* 保存最近 N 次得分做滑动平均 */
                     static constexpr int N = 5;
@@ -530,7 +630,7 @@ void Application::imu_task(void* arg)
 
                     ESP_LOGI("FIT",
                             "Rep=%d  act=%d  ΔP=%.1f  ΔR=%.1f  t=%.2f s  score=%.1f  avg=%.1f",
-                            rep_cnt, cur_exercise, dP, dR, rep_us/1e6f, score, avg);
+                            rep_cnt, rep_report.ex, dP, dR, rep_us/1e6f, score, avg);
 
                     phase = PHASE_IDLE;
                 }
@@ -548,15 +648,15 @@ void Application::imu_task(void* arg)
                 float pitch = eu.angle.pitch;
                 float roll  = eu.angle.roll;
 
-                // ESP_LOGI("9DOF",
-                //         "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
-                //         "ACC[g]=%.3f,%.3f,%.3f  "
-                //         "GYR[dps]=%.1f,%.1f,%.1f  "
-                //         "MAG[uT]=%.1f,%.1f,%.1f", 
-                //         yaw, pitch, roll,
-                //         imu.acc.x/ACC_LSB, imu.acc.y/ACC_LSB, imu.acc.z/ACC_LSB,
-                //         gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
-                //         mag_uT[0], mag_uT[1], mag_uT[2]);
+                ESP_LOGI("9DOF",
+                        "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
+                        "ACC[g]=%.3f,%.3f,%.3f  "
+                        "GYR[dps]=%.1f,%.1f,%.1f  "
+                        "MAG[uT]=%.1f,%.1f,%.1f", 
+                        yaw, pitch, roll,
+                        imu.acc.x/ACC_LSB, imu.acc.y/ACC_LSB, imu.acc.z/ACC_LSB,
+                        gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
+                        mag_uT[0], mag_uT[1], mag_uT[2]);
             }
 
 
@@ -573,6 +673,7 @@ void Application::imu_task(void* arg)
             }
             
 
+        }
         }
         vTaskDelay(pdMS_TO_TICKS(10));      // 
     }
@@ -855,63 +956,30 @@ void Application::MessageProcessingTask(void* pv) {
 }
 
 // 3) JSON 解析并分发逻辑
-void Application::handleStartTrainingJson(char* json)
-{
+void Application::handleStartTrainingJson(char* json) {
     cJSON* root = cJSON_Parse(json);
     if (!root) {
-        ESP_LOGE(TAG, "invalid JSON: %s", json);
-        return;
-    }
-    /* ---------- A. 处理 setUser ---------- */
-    const cJSON* event = cJSON_GetObjectItemCaseSensitive(root, "event");
-    if (cJSON_IsString(event) && strcmp(event->valuestring, "setUser") == 0) {
-        int uid = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "userId"));
-
-        // 解析可选的 hwWeight（支持 number 或 string）
-        float hw = -1.0;
-        const cJSON* jhw = cJSON_GetObjectItemCaseSensitive(root, "hwWeight");
-        if (cJSON_IsNumber(jhw)) {
-            hw = jhw->valuedouble;
-        } else if (cJSON_IsString(jhw) && jhw->valuestring) {
-            try { hw = std::stof(jhw->valuestring); } catch (...) { hw = -1.0; }
-        }
-
-        if (uid > 0) {
-            RemoteDataService::GetInstance().SetCurrentUserId(uid);
-
-            if (hw > 0.0) {
-                // 将当前配重存到 MCP 层，供后续 create_day 缺省使用
-                McpServer::GetInstance().SetCurrentUserTWeight(hw);
-                ESP_LOGI(TAG, "Bound userId=%d, hwWeight=%.3f", uid, hw);
-            } else {
-                ESP_LOGI(TAG, "Bound userId=%d (no valid hwWeight provided)", uid);
-            }
-
-            sendToClient(R"({"success":true,"event":"user_bound"})");
-            McpServer::GetInstance().SetCurrentUserId(uid);
-        }
-        cJSON_Delete(root);
+        ESP_LOGE(TAG, "handleStartTrainingJson: invalid JSON");
         return;
     }
 
-
-    /* ---------- B. 处理训练计划 ---------- */
+    ESP_LOGI("TAG", "Received JSON: %s", json);
+    // 取 items 数组
     cJSON* items = cJSON_GetObjectItem(root, "items");
     if (items && cJSON_IsArray(items)) {
-
-
-
         int count = cJSON_GetArraySize(items);
         for (int i = 0; i < count; ++i) {
             cJSON* it = cJSON_GetArrayItem(items, i);
             int type   = cJSON_GetObjectItem(it, "type")->valueint;
             int reps   = cJSON_GetObjectItem(it, "reps")->valueint;
             int weight = cJSON_GetObjectItem(it, "weight")->valueint;
-
-            // TODO: 调用你的训练逻辑，例如：
-            // StartTrainingItem(sets, type, reps, weight);
-            ESP_LOGI(TAG, "[%d]  type=%d reps=%d weight=%d",
-                     i, type, reps, weight);
+            // 调用你的训练逻辑，比如：
+        rep_cnt=0;
+        rep_report.rep_idx = reps;
+        phase   = PHASE_IDLE;
+        rep_report.ex = static_cast<Exercise>(type);
+        rep_report.score = 0.0f;
+        is_rep_counting = true;
         }
     }
 
