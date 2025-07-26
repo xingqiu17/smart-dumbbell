@@ -67,18 +67,21 @@ struct bmm150_dev;
 
 /* —— 简易动作分类 —— */
 enum Exercise {
-    EX_UNKNOWN,
-    EX_CURL,           // 弯举
-    EX_LATERAL_RAISE,  // 侧平举
-    EX_SHOULDER_PRESS, // 过头推
-    EX_BENT_ROW,       // 俯身划船
-    EX_TRICEPS_KB,      // 三头肌臂屈伸
-    EX_SNATCH_HIGH_PULL,// 爆发上拉
-    EX_WRIST_CURL,         // 手腕卷
-    EX_BENT_OVER_ROW,      // 俯身划船
-    EX_TWIST_TORSO        // 俄式转体
+    EX_UNKNOWN = 0,
+    EX_AIDBC   = 2,
+    EX_30DBP   = 3,
+    EX_DWC     = 1,
+    EX_DLR     = 4,
+    EX_45DBP   = 5,
+    EX_DSP     = 6,
+    EX_IDBC    = 7
 };
 
+struct RepReport {
+    Exercise ex;
+    uint32_t rep_idx;      // 从 1 开始
+    float    score;        // 0-100
+};
 
 class Application {
 public:

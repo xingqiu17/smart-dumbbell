@@ -3,7 +3,7 @@
 namespace Eloquent {
     namespace ML {
         namespace Port {
-            class RandomForestRegressor {
+            class RandomForestRegressor_DWC {
                 public:
                     /**
                     * Predict class for features vector
