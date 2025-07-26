@@ -1,6 +1,7 @@
 #include "remote_data_service.h"
 #include "esp_log.h"
 #include "cJSON.h"
+#include "db_connect.h"
 
 static const char *TAG_RDS = "RemoteDataService";
 
@@ -19,7 +20,87 @@ RemoteDataService& RemoteDataService::GetInstance()
 bool RemoteDataService::GetUserInfo(int userId, User& out_user)
 {
     return getUserInfo(userId, out_user);   // 复用 db_connect.cc
+    
 }
+
+/* ---------- 更新昵称 ---------- */
+bool RemoteDataService::UpdateName(int uid, const std::string& name)
+{
+    char url[160];
+    snprintf(url, sizeof(url), "http://154.9.24.233:8080/api/v1/users/%d/name", uid);
+
+    // 构造 JSON
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "name", name.c_str());
+    char* raw = cJSON_PrintUnformatted(root);
+    std::string payload = raw ? raw : "{}";
+    if (raw) cJSON_free(raw);
+    cJSON_Delete(root);
+
+    std::string resp;
+    auto err = http_request(HTTP_METHOD_POST, url, &payload, resp, "application/json");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG_RDS, "UpdateName uid=%d failed", uid);
+        return false;
+    }
+    ESP_LOGI(TAG_RDS, "UpdateName uid=%d ok", uid);
+    return true;
+}
+
+/* ---------- 更新身体数据 ---------- */
+bool RemoteDataService::UpdateBody(int uid, const std::string& birthday,
+                                   float height, float weight, int gender)
+{
+    char url[160];
+    snprintf(url, sizeof(url), "http://154.9.24.233:8080/api/v1/users/%d/body", uid);
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "birthday", birthday.c_str()); // "YYYY-MM-DD"
+    cJSON_AddNumberToObject(root, "height",   height);
+    cJSON_AddNumberToObject(root, "weight",   weight);
+    cJSON_AddNumberToObject(root, "gender",   gender);
+    char* raw = cJSON_PrintUnformatted(root);
+    std::string payload = raw ? raw : "{}";
+    if (raw) cJSON_free(raw);
+    cJSON_Delete(root);
+
+    std::string resp;
+    auto err = http_request(HTTP_METHOD_POST, url, &payload, resp, "application/json");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG_RDS, "UpdateBody uid=%d failed", uid);
+        return false;
+    }
+    ESP_LOGI(TAG_RDS, "UpdateBody uid=%d ok", uid);
+    return true;
+}
+
+/* ---------- 更新训练数据 ---------- */
+bool RemoteDataService::UpdateTrainData(int uid, int aim, float hwWeight)
+{
+    char url[200];
+    snprintf(url, sizeof(url), "http://154.9.24.233:8080/api/v1/users/%d/trainData", uid);
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "aim",      aim);
+    cJSON_AddNumberToObject(root, "hwWeight", hwWeight);
+    char* raw = cJSON_PrintUnformatted(root);
+    std::string payload = raw ? raw : "{}";
+    if (raw) cJSON_free(raw);
+    cJSON_Delete(root);
+
+    std::string resp;
+    auto err = http_request(HTTP_METHOD_POST, url, &payload, resp, "application/json");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG_RDS, "UpdateTrainData uid=%d failed", uid);
+        return false;
+    }
+    ESP_LOGI(TAG_RDS, "UpdateTrainData uid=%d ok", uid);
+    return true;
+}
+
+
+
+
 
 /* ---------- 指定 uid 生成 JSON ---------- */
 std::string RemoteDataService::GetUserDataJson(int userId)

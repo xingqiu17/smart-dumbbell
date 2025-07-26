@@ -2,7 +2,10 @@
 #define DB_CONNECT_H
 
 #include "esp_err.h"
+#include "esp_http_client.h"
 #include <string>
+#include <vector>
+#include <utility>
 
 /**
  * 与后端接口字段对应的 C++ 结构体
@@ -19,14 +22,7 @@ struct User {
     float       hwWeight;
 };
 
-/**
- * @brief 执行 HTTP GET 并返回响应体字符串
- *
- * @param url        请求 URL
- * @param out_body   输出：服务器返回的响应体
- * @return ESP_OK    表示成功，否则返回相应的错误码
- */
-esp_err_t http_get(const std::string& url, std::string& out_body);
+
 
 /**
  * @brief 将 JSON 字符串解析为 User 结构
@@ -49,6 +45,28 @@ bool parse_user_json(const std::string& json, User& user);
  * @return true     获取并解析成功
  * @return false    获取或解析失败
  */
+
+/**
+ * 通用 HTTP 请求（支持 GET/POST/PUT/PATCH/DELETE，自动收集 chunked 响应）
+ * @param method        HTTP_METHOD_GET / POST / PUT / PATCH / DELETE
+ * @param url           完整 URL
+ * @param body          可为 nullptr；非空时作为请求体发送
+ * @param out_body      输出：响应体（可能为空，例如 204）
+ * @param content_type  可为 nullptr；非空时设置 Content-Type
+ * @param extra_headers 可为 nullptr；额外请求头（键值对）
+ * @return ESP_OK 表示 2xx；否则返回错误码
+ */
+esp_err_t http_request(esp_http_client_method_t method,
+                       const std::string& url,
+                       const std::string* body,
+                       std::string& out_body,
+                       const char* content_type = nullptr,
+                       const std::vector<std::pair<std::string,std::string>>* extra_headers = nullptr);
+
+
+
+
+
 bool getUserInfo(int userId, User& out_user);
 
 

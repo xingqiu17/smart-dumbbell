@@ -37,38 +37,69 @@ static esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 }
 
 
-// 执行 HTTP GET 并返回响应体字符串
-esp_err_t http_get(const std::string& url, std::string& out_body) {
-    ESP_LOGI(TAG, "http_get() URL: %s", url.c_str());
+esp_err_t http_request(esp_http_client_method_t method,
+                       const std::string& url,
+                       const std::string* body,
+                       std::string& out_body,
+                       const char* content_type,
+                       const std::vector<std::pair<std::string,std::string>>* extra_headers)
+{
+    ESP_LOGI(TAG, "http_request() %d %s", (int)method, url.c_str());
+    out_body.clear();
 
     esp_http_client_config_t config = {};
-    config.url          = url.c_str();
-    config.method       = HTTP_METHOD_GET;
-    config.timeout_ms   = 5000;
-    config.event_handler= _http_event_handler;     // ★ 注册事件回调
-    config.user_data    = &out_body;               // ★ 让回调能把数据塞进来
+    config.url           = url.c_str();
+    config.method        = method;
+    config.timeout_ms    = 5000;
+    config.event_handler = _http_event_handler; // 在 ON_DATA 里追加到 out_body
+    config.user_data     = &out_body;
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
-        ESP_LOGE(TAG, "Failed to init HTTP client");
+        ESP_LOGE(TAG, "http_request: init client failed");
         return ESP_FAIL;
     }
 
+    // 额外请求头
+    if (extra_headers) {
+        for (auto& kv : *extra_headers) {
+            esp_http_client_set_header(client, kv.first.c_str(), kv.second.c_str());
+        }
+    }
+
+    // 设置请求体
+    if (body && !body->empty()) {
+        if (content_type && *content_type) {
+            esp_http_client_set_header(client, "Content-Type", content_type);
+        }
+        esp_http_client_set_post_field(client, body->c_str(), body->size());
+    } else if (content_type && *content_type) {
+        // 没有 body 也允许显式 Content-Type（可选）
+        esp_http_client_set_header(client, "Content-Type", content_type);
+    }
+
     esp_err_t err = esp_http_client_perform(client);
-    ESP_LOGI(TAG, "http_get() perform result: %s", esp_err_to_name(err));
+    ESP_LOGI(TAG, "http_request() perform: %s", esp_err_to_name(err));
     if (err == ESP_OK) {
         int status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "http_get() HTTP status code = %d", status);
-        ESP_LOGI(TAG, "http_get() is_chunked = %d", esp_http_client_is_chunked_response(client));
-        if (status != 200) {
-            ESP_LOGE(TAG, "HTTP GET failed with status %d", status);
+        bool chunked = esp_http_client_is_chunked_response(client);
+        ESP_LOGI(TAG, "http_request() status=%d, chunked=%d, resp_len=%d",
+                 status, (int)chunked, (int)out_body.size());
+
+        // 统一把 2xx 当作成功（200/201/204…）
+        if (status < 200 || status >= 300) {
+            ESP_LOGE(TAG, "http_request() unexpected status %d", status);
             err = ESP_FAIL;
         }
     } else {
-        ESP_LOGE(TAG, "HTTP GET perform failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "http_request() perform failed: %s", esp_err_to_name(err));
     }
 
-    ESP_LOGI(TAG, "http_get() raw body (len=%d): %s", (int)out_body.size(), out_body.c_str());
+    if (!out_body.empty()) {
+        ESP_LOGI(TAG, "http_request() body: %.*s", (int)out_body.size(), out_body.c_str());
+    } else {
+        ESP_LOGI(TAG, "http_request() body: <empty>");
+    }
 
     esp_http_client_cleanup(client);
     return err;
@@ -111,7 +142,7 @@ bool getUserInfo(int userId, User& out_user) {
              "http://154.9.24.233:8080/api/v1/users/%d",
              userId);
     std::string body;
-    esp_err_t err = http_get(url_buf, body);
+    esp_err_t err = http_request(HTTP_METHOD_GET, url_buf, /*body*/nullptr, body);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to fetch user info");
         return false;

@@ -51,6 +51,72 @@ void McpServer::AddCommonTools() {
             return RemoteDataService::GetInstance().GetUserDataJson(uid);
         });
 
+    // 修改昵称
+    AddTool("self.user.set_name",
+        "Update user's display name.",
+        PropertyList({
+            Property("name", kPropertyTypeString)   // 1~16 字符
+        }),
+        [this](const PropertyList& props) -> ReturnValue {
+            int uid = this->current_user_id_;
+            if (uid <= 0) return R"({"success":false,"message":"no_user"})";
+            auto name = props["name"].value<std::string>();
+            ESP_LOGI(TAG, "set_name uid=%d, name=%s", uid, name.c_str());
+            bool ok = RemoteDataService::GetInstance().UpdateName(uid, name);
+            return ok ? R"({"success":true})" : R"({"success":false})";
+        });
+
+    // 修改身体数据：birthday(YYYY-MM-DD)、height(cm)、weight(kg)、gender(0/1/2)
+    // 说明：当前 Property 仅支持 int/string/bool，为支持小数，height/weight 用 string 传，如 "172.5"
+    AddTool("self.user.set_body",
+        "Update user's body data.Include birthday,height,weight and gender.About gender, 0 is unkonwn,1 is male,2 is female.",
+        PropertyList({
+            Property("birthday", kPropertyTypeString),       // "YYYY-MM-DD"
+            Property("height",   kPropertyTypeString),       // e.g. "172.0"
+            Property("weight",   kPropertyTypeString),       // e.g. "60.5"
+            Property("gender",   kPropertyTypeInteger, 0, 2) // 0..2
+        }),
+        [this](const PropertyList& props) -> ReturnValue {
+            int uid = this->current_user_id_;
+            if (uid <= 0) return R"({"success":false,"message":"no_user"})";
+
+            auto birthday = props["birthday"].value<std::string>();
+            float height  = 0.f, weight = 0.f;
+            try { height = std::stof(props["height"].value<std::string>()); } catch (...) {}
+            try { weight = std::stof(props["weight"].value<std::string>()); } catch (...) {}
+            int gender    = props["gender"].value<int>();
+
+            ESP_LOGI(TAG, "set_body uid=%d, birthday=%s, h=%.2f, w=%.2f, g=%d",
+                    uid, birthday.c_str(), height, weight, gender);
+
+            bool ok = RemoteDataService::GetInstance().UpdateBody(uid, birthday, height, weight, gender);
+            return ok ? R"({"success":true})" : R"({"success":false})";
+        });
+
+
+    // 修改训练目标/重量：aim、hwWeight(kg)
+    // 说明：hwWeight 允许小数，因此用 string 传，例如 "11.5"
+    AddTool("self.user.set_train_data",
+        "Update user's training aim and hwWeight(kg).About aim: 0 is no aim,1 is arm,2 is shoulder, 3 is chest,4 is back,5 is leg",
+        PropertyList({
+            Property("aim",      kPropertyTypeInteger),
+            Property("hwWeight", kPropertyTypeString)   // e.g. "11.5"
+        }),
+        [this](const PropertyList& props) -> ReturnValue {
+            int uid = this->current_user_id_;
+            if (uid <= 0) return R"({"success":false,"message":"no_user"})";
+
+            int   aim = props["aim"].value<int>();
+            float hw  = 0.f;
+            try { hw = std::stof(props["hwWeight"].value<std::string>()); } catch (...) {}
+
+            ESP_LOGI(TAG, "set_train_data uid=%d, aim=%d, hwWeight=%.2f", uid, aim, hw);
+
+            bool ok = RemoteDataService::GetInstance().UpdateTrainData(uid, aim, hw);
+            return ok ? R"({"success":true})" : R"({"success":false})";
+        });
+
+
     //获取状态工具
     AddTool("self.get_device_status",
         "Provides the real-time information of the device, including the current status of the audio speaker, screen, battery, network, etc.\n"

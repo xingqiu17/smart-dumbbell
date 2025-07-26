@@ -26,6 +26,16 @@ public:
     /** 拉取用户信息并填充结构体（显式传 uid） */
     bool GetUserInfo(int userId, User& out_user);
 
+    // 更新昵称
+    bool UpdateName(int uid, const std::string& name);
+
+    // 更新身体数据：birthday(YYYY-MM-DD)、height(cm)、weight(kg)、gender(0/1/2)
+    bool UpdateBody(int uid, const std::string& birthday, float height, float weight, int gender);
+
+    // 更新训练相关：aim 与 hwWeight(kg，可带小数)
+    bool UpdateTrainData(int uid, int aim, float hwWeight);
+
+
     /** 用指定 uid 返回 JSON */
     std::string GetUserDataJson(int userId);
 
