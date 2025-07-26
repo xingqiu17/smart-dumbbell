@@ -332,7 +332,6 @@ bool Application::GetLatestMag(float out[3])
 
 void Application::imu_task(void* arg)
 {
-    auto* self = static_cast<Application*>(arg);
     bmi2_sens_data imu{};      // 本地缓冲
     bmm150_mag_data mag{}; 
     float          mag_uT[3];
