@@ -66,6 +66,21 @@ esp_err_t http_request(esp_http_client_method_t method,
 
 
 
+/**
+ * 查询某用户某日的所有计划（原样返回后端 JSON 数组）
+ * GET /api/plan/session/day?userId={uid}&date=YYYY-MM-DD
+ */
+bool getPlansOfDay(int userId, const std::string& date, std::string& out_json);
+
+/**
+ * 创建某用户某日的一条计划（含多动作）
+ * POST /api/plan/session
+ * @param items_json 形如：[{"type":1,"number":12,"tOrder":1,"tWeight":10}, ...]
+ */
+bool createPlanOfDay(int userId, const std::string& date,
+                     const std::string& items_json,
+                     std::string& out_json);
+
 
 bool getUserInfo(int userId, User& out_user);
 

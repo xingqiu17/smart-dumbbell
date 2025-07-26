@@ -867,17 +867,33 @@ void Application::handleStartTrainingJson(char* json)
     if (cJSON_IsString(event) && strcmp(event->valuestring, "setUser") == 0) {
         int uid = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "userId"));
 
+        // 解析可选的 hwWeight（支持 number 或 string）
+        float hw = -1.0;
+        const cJSON* jhw = cJSON_GetObjectItemCaseSensitive(root, "hwWeight");
+        if (cJSON_IsNumber(jhw)) {
+            hw = jhw->valuedouble;
+        } else if (cJSON_IsString(jhw) && jhw->valuestring) {
+            try { hw = std::stof(jhw->valuestring); } catch (...) { hw = -1.0; }
+        }
+
         if (uid > 0) {
             RemoteDataService::GetInstance().SetCurrentUserId(uid);
 
-            // ② 直接用已有的 sendToClient 发送确认
+            if (hw > 0.0) {
+                // 将当前配重存到 MCP 层，供后续 create_day 缺省使用
+                McpServer::GetInstance().SetCurrentUserTWeight(hw);
+                ESP_LOGI(TAG, "Bound userId=%d, hwWeight=%.3f", uid, hw);
+            } else {
+                ESP_LOGI(TAG, "Bound userId=%d (no valid hwWeight provided)", uid);
+            }
+
             sendToClient(R"({"success":true,"event":"user_bound"})");
-            ESP_LOGI(TAG, "Bound userId=%d", uid);
             McpServer::GetInstance().SetCurrentUserId(uid);
         }
         cJSON_Delete(root);
         return;
     }
+
 
     /* ---------- B. 处理训练计划 ---------- */
     cJSON* items = cJSON_GetObjectItem(root, "items");

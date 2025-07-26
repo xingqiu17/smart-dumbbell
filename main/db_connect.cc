@@ -162,4 +162,66 @@ bool getUserInfo(int userId, User& out_user) {
 }
 
 
+// —— 训练计划：查询某日所有计划 ——
+// 返回值：true 表示 HTTP 2xx 且 out_json 有（可能是 "[]"）
+// 注意：这里直接把后端 JSON 转给上层，设备侧不做结构化解析
+bool getPlansOfDay(int userId, const std::string& date, std::string& out_json) {
+    char url[256];
+    // date 必须是 YYYY-MM-DD（已在上层保证），无需额外编码
+    snprintf(url, sizeof(url),
+             "http://154.9.24.233:8080/api/plan/session/day?userId=%d&date=%s",
+             userId, date.c_str());
+
+    std::string body;
+    esp_err_t err = http_request(HTTP_METHOD_GET, url, /*body*/nullptr, body);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "getPlansOfDay failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "getPlansOfDay OK (len=%d)", (int)body.size());
+    out_json.swap(body);
+    return true;
+}
+
+// —— 训练计划：创建某日计划 ——
+// items_json 必须是 JSON 数组字符串（例如：[{"type":1,"number":12,"tOrder":1,"tWeight":10}, ...]）
+bool createPlanOfDay(int userId, const std::string& date,
+                     const std::string& items_json,
+                     std::string& out_json) {
+    // 构建请求体：{"userId":..,"date":"YYYY-MM-DD","items":[...]}
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "userId", userId);
+    cJSON_AddStringToObject(root, "date", date.c_str());
+
+    cJSON* items = cJSON_Parse(items_json.c_str());
+    if (!items || !cJSON_IsArray(items)) {
+        ESP_LOGE(TAG, "createPlanOfDay: items_json is not a valid JSON array: %s",
+                 items_json.c_str());
+        if (items) cJSON_Delete(items);
+        cJSON_Delete(root);
+        return false;
+    }
+    // 交给 root 托管
+    cJSON_AddItemToObject(root, "items", items);
+
+    char* raw = cJSON_PrintUnformatted(root);
+    std::string payload = raw ? raw : "{}";
+    if (raw) cJSON_free(raw);
+    cJSON_Delete(root);
+
+    std::string body;
+    esp_err_t err = http_request(HTTP_METHOD_POST,
+                                 "http://154.9.24.233:8080/api/plan/session",
+                                 &payload, body, "application/json");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "createPlanOfDay failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "createPlanOfDay OK (len=%d)", (int)body.size());
+    out_json.swap(body);
+    return true;
+}
+
+
+
 

@@ -1,7 +1,7 @@
 #include "remote_data_service.h"
 #include "esp_log.h"
 #include "cJSON.h"
-#include "db_connect.h"
+#include "db_connect.h"   // 声明了 http_request / getPlansOfDay / createPlanOfDay / User 等
 
 static const char *TAG_RDS = "RemoteDataService";
 
@@ -19,8 +19,7 @@ RemoteDataService& RemoteDataService::GetInstance()
 /* -------------------------------------------------------------- */
 bool RemoteDataService::GetUserInfo(int userId, User& out_user)
 {
-    return getUserInfo(userId, out_user);   // 复用 db_connect.cc
-    
+    return getUserInfo(userId, out_user);   // 复用 user_client/db_connect 里的实现
 }
 
 /* ---------- 更新昵称 ---------- */
@@ -98,10 +97,6 @@ bool RemoteDataService::UpdateTrainData(int uid, int aim, float hwWeight)
     return true;
 }
 
-
-
-
-
 /* ---------- 指定 uid 生成 JSON ---------- */
 std::string RemoteDataService::GetUserDataJson(int userId)
 {
@@ -122,7 +117,7 @@ std::string RemoteDataService::GetUserDataJson(int userId)
 
     char *raw = cJSON_PrintUnformatted(root);
     std::string json(raw ? raw : "{}");
-    cJSON_free(raw);
+    if (raw) cJSON_free(raw);
     cJSON_Delete(root);
     return json;
 }
@@ -135,3 +130,40 @@ std::string RemoteDataService::GetUserDataJson()
     }
     return GetUserDataJson(current_user_id_);
 }
+
+/* -------------------------------------------------------------- */
+/* 训练计划实现                                                   */
+/* -------------------------------------------------------------- */
+
+/* === 查询：显式 uid 版本（与头文件声明匹配）=== */
+bool RemoteDataService::GetDayPlans(int userId, const std::string& date, std::string& out_json)
+{
+    out_json.clear();
+    std::string json;
+    if (!getPlansOfDay(userId, date, json)) {
+        ESP_LOGE(TAG_RDS, "GetDayPlans(uid=%d, date=%s) failed", userId, date.c_str());
+        return false;
+    }
+    // 成功：json 一定是数组字符串（无数据则 "[]")
+    out_json.swap(json);
+    ESP_LOGI(TAG_RDS, "GetDayPlans ok: len=%d", (int)out_json.size());
+    return true;
+}
+
+bool RemoteDataService::CreateDayPlan(int userId, const std::string& date,
+                                      const std::string& items_json,
+                                      std::string& out_json)
+{
+    ESP_LOGI(TAG_RDS, "CreateDayPlan uid=%d date=%s items=%s",
+             userId, date.c_str(), items_json.c_str());
+
+    std::string resp;
+    if (!createPlanOfDay(userId, date, items_json, resp)) {
+        ESP_LOGE(TAG_RDS, "CreateDayPlan(uid=%d) failed", userId);
+        return false;
+    }
+    out_json.swap(resp);  // 返回后端的单条 PlanDayResp（session + items）
+    ESP_LOGI(TAG_RDS, "CreateDayPlan ok");
+    return true;
+}
+

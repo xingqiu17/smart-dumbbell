@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <math.h>   // for isnan, isinf, isfinite
 
 #include <cJSON.h>
 
@@ -263,6 +264,8 @@ public:
     void ParseMessage(const std::string& message);
     void SetCurrentUserId(int uid) { current_user_id_ = uid; }
 
+    void SetCurrentUserTWeight(float tweight);
+
 private:
     McpServer();
     ~McpServer();
@@ -278,6 +281,7 @@ private:
     std::vector<McpTool*> tools_;
     std::thread tool_call_thread_;
     int current_user_id_ = 0;
+    float current_user_tweight_ = 0;
 };
 
 #endif // MCP_SERVER_H

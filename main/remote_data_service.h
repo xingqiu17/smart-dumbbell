@@ -42,6 +42,29 @@ public:
     /** 用当前已绑定 uid 返回 JSON；若未绑定返回 {"success":false,…} */
     std::string GetUserDataJson();
 
+
+    // ===== 训练计划 =====
+
+    // —— 查询（首选）
+    bool GetDayPlans(int userId, const std::string& date, std::string& out_json);
+
+    // —— 可选：便捷封装，使用当前 uid（内联）
+    bool GetDayPlans(const std::string& date, std::string& out_json) {
+        if (current_user_id_ < 0) return false;
+        return GetDayPlans(current_user_id_, date, out_json);
+    }
+
+    // —— 创建（含内部先查后建的幂等保护）
+    bool CreateDayPlan(int userId, const std::string& date,
+                       const std::string& items_json, std::string& out_json);
+
+    // —— 可选：便捷封装，使用当前 uid（内联）
+    bool CreateDayPlan(const std::string& date,
+                       const std::string& items_json, std::string& out_json) {
+        if (current_user_id_ < 0) { out_json = R"({"success":false,"message":"user not bound"})"; return false; }
+        return CreateDayPlan(current_user_id_, date, items_json, out_json);
+    }
+
 private:
     RemoteDataService() = default;
     RemoteDataService(const RemoteDataService&)            = delete;

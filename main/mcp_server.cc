@@ -17,10 +17,17 @@
 #include "bmi270.h"
 #include "bmm150.h"
 #include "remote_data_service.h"
+#include "cJSON.h"
+#include <ctime>
 
 #define TAG "MCP"
 
 #define DEFAULT_TOOLCALL_STACK_SIZE 6144
+
+
+
+
+
 
 McpServer::McpServer() {
 }
@@ -115,6 +122,193 @@ void McpServer::AddCommonTools() {
             bool ok = RemoteDataService::GetInstance().UpdateTrainData(uid, aim, hw);
             return ok ? R"({"success":true})" : R"({"success":false})";
         });
+
+    
+
+    // 查询某日的所有计划（只读，不创建）
+    AddTool("self.plan.get_day",
+        "Get all plans for the given date of the current user. "
+        "Args: date (YYYY-MM-DD or 'today'). "
+        "Return: JSON array. Use this ONLY for reading, never for creating.",
+        PropertyList({
+            Property("date", kPropertyTypeString)
+        }),
+        [this](const PropertyList& props) -> ReturnValue {
+            int uid = this->current_user_id_;
+            if (uid <= 0) return R"({"success":false,"message":"no_user"})";
+
+            std::string date = props["date"].value<std::string>();
+
+            // 支持 'today'
+            auto normalizeDate = [](std::string& d) {
+                if (d.empty() || d == "today" || d == "Today" || d == "TODAY") {
+                    time_t now = time(nullptr);
+                    struct tm tm_info;
+                    localtime_r(&now, &tm_info);
+                    char buf[11] = {0}; // "YYYY-MM-DD"
+                    strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_info);
+                    d.assign(buf);
+                }
+            };
+            normalizeDate(date);
+
+            std::string jsonArr;  // 期望为 "[]" 或 "[{...}]"
+            bool ok = RemoteDataService::GetInstance().GetDayPlans(uid, date, jsonArr);
+            if (!ok) return R"({"success":false,"message":"fetch_failed"})";
+
+            // 直接把后端返回的数组透传给模型/上层
+            return jsonArr;
+        });
+
+
+    // 创建某日计划（包含多个动作）
+    AddTool("self.plan.create_day",
+        "Create a plan for the given date of the current user. "
+        "Args: date (YYYY-MM-DD or 'today'), items (JSON array string). "
+        "Each item MUST contain: type(int), number(int), tOrder(int). "
+        "tWeight(float) is OPTIONAL — include it ONLY if the user explicitly specifies a weight; "
+        "About type: 1=dumbbell-curl."
+        "IMPORTANT: type must be an integer ID (do NOT send strings).",
+        PropertyList({
+            Property("date",  kPropertyTypeString),
+            Property("items", kPropertyTypeString)   // JSON 数组字符串
+        }),
+        [this](const PropertyList& props) -> ReturnValue {
+            int uid = this->current_user_id_;
+            if (uid <= 0) return R"({"success":false,"message":"no_user"})";
+
+            std::string date  = props["date"].value<std::string>();
+            std::string items = props["items"].value<std::string>();
+
+            // 支持 "today"
+            auto normalizeDate = [](std::string& d) {
+                if (d == "today" || d == "Today" || d == "TODAY" || d.empty()) {
+                    time_t now = time(nullptr);
+                    struct tm tm_info;
+                    localtime_r(&now, &tm_info);
+                    char buf[11] = {0}; // "YYYY-MM-DD"
+                    strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_info);
+                    d.assign(buf);
+                }
+            };
+            normalizeDate(date);
+
+            // 解析 items 原始 JSON
+            cJSON* arr = cJSON_Parse(items.c_str());
+            if (!arr || !cJSON_IsArray(arr)) {
+                if (arr) cJSON_Delete(arr);
+                return R"({"success":false,"message":"items_not_array"})";
+            }
+
+            // 归一化后的 items（type/number/tOrder 为 int；tWeight 为 float）
+            cJSON* norm_items = cJSON_CreateArray();
+            const int n = cJSON_GetArraySize(arr);
+            for (int i = 0; i < n; ++i) {
+                cJSON* it = cJSON_GetArrayItem(arr, i);
+                if (!cJSON_IsObject(it)) {
+                    cJSON_Delete(norm_items); cJSON_Delete(arr);
+                    return R"({"success":false,"message":"items[i]_not_object"})";
+                }
+
+                // type：必须是整数
+                int type_id = -1;
+                if (cJSON* jt = cJSON_GetObjectItemCaseSensitive(it, "type")) {
+                    if (cJSON_IsNumber(jt)) type_id = jt->valueint;
+                    else { // 明确拒绝字符串等
+                        cJSON_Delete(norm_items); cJSON_Delete(arr);
+                        return std::string("{\"success\":false,\"message\":\"type_must_be_integer_at_index_")
+                            + std::to_string(i+1) + "\"}";
+                    }
+                }
+                if (type_id <= 0) {
+                    cJSON_Delete(norm_items); cJSON_Delete(arr);
+                    return std::string("{\"success\":false,\"message\":\"bad_type_at_index_")
+                        + std::to_string(i+1) + "\"}";
+                }
+
+                // number
+                int number = -1;
+                if (cJSON* jn = cJSON_GetObjectItemCaseSensitive(it, "number")) {
+                    if (cJSON_IsNumber(jn)) number = jn->valueint;
+                }
+                if (number <= 0) {
+                    cJSON_Delete(norm_items); cJSON_Delete(arr);
+                    return std::string("{\"success\":false,\"message\":\"bad_number_at_index_")
+                        + std::to_string(i+1) + "\"}";
+                }
+
+                // tOrder
+                int tOrder = -1;
+                if (cJSON* jo = cJSON_GetObjectItemCaseSensitive(it, "tOrder")) {
+                    if (cJSON_IsNumber(jo)) tOrder = jo->valueint;
+                }
+                if (tOrder <= 0) {
+                    cJSON_Delete(norm_items); cJSON_Delete(arr);
+                    return std::string("{\"success\":false,\"message\":\"bad_tOrder_at_index_")
+                        + std::to_string(i+1) + "\"}";
+                }
+
+                float tWeight = this->current_user_tweight_;
+                
+                ESP_LOGI(TAG, "create_day: default tWeight before parse = %.3f, this=%p",
+                        (double)this->current_user_tweight_, this);
+
+                const cJSON* jw = cJSON_GetObjectItemCaseSensitive(it, "tWeight");
+                if (jw) {
+                    if (cJSON_IsNumber(jw)) {
+                        tWeight = static_cast<float>(jw->valuedouble);
+                    } else if (cJSON_IsString(jw) && jw->valuestring && jw->valuestring[0] != '\0') {
+                        try {
+                            tWeight = std::stof(jw->valuestring);  // 解析失败则捕获并保留默认
+                        } catch (...) {
+                            ESP_LOGW(TAG, "create_day: tWeight string parse failed, use default=%.3f",
+                                    static_cast<double>(tWeight));
+                            // 保持默认，不要改成 -1
+                        }
+                    } else if (cJSON_IsNull(jw)) {
+                        // 明确 null：保留默认
+                    } else {
+                        // 其它类型：保留默认
+                    }
+                }
+
+
+                // 最终校验：若默认也无效（<=0），才报错
+                if (!(tWeight > 0.0f) || !std::isfinite(tWeight)) {
+                    ESP_LOGE(TAG, "create_day: no valid tWeight; default(current_user_tweight_=%.3f) invalid",
+                            static_cast<double>(this->current_user_tweight_));
+                    cJSON_Delete(norm_items); cJSON_Delete(arr);
+                    return std::string("{\"success\":false,\"message\":\"bad_tWeight_at_index_")
+                        + std::to_string(i+1) + "\"}";
+                }
+
+                cJSON* out = cJSON_CreateObject();
+                cJSON_AddNumberToObject(out, "type",    type_id);
+                cJSON_AddNumberToObject(out, "number",  number);
+                cJSON_AddNumberToObject(out, "tOrder",  tOrder);
+                cJSON_AddNumberToObject(out, "tWeight", tWeight); // 以 number 发送
+                cJSON_AddItemToArray(norm_items, out);
+            }
+            cJSON_Delete(arr);
+
+            // 序列化并发送
+            char* norm_str = cJSON_PrintUnformatted(norm_items);
+            std::string norm_items_json = norm_str ? norm_str : "[]";
+            if (norm_str) cJSON_free(norm_str);
+            cJSON_Delete(norm_items);
+
+            ESP_LOGI(TAG, "Tool self.plan.create_day uid=%d date=%s normalized_items=%s",
+                    uid, date.c_str(), norm_items_json.c_str());
+
+            std::string resp;
+            bool ok = RemoteDataService::GetInstance().CreateDayPlan(uid, date, norm_items_json, resp);
+            if (!ok) return R"({"success":false,"message":"create_failed"})";
+            return resp;
+        });
+
+
+
+
 
 
     //获取状态工具
@@ -455,3 +649,14 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     });
     tool_call_thread_.detach();
 }
+
+
+void McpServer::SetCurrentUserTWeight(float tweight) {
+    current_user_tweight_ = tweight;
+    ESP_LOGI(TAG,
+             "SetCurrentUserTWeight: this=%p hw=%.3f",
+             this,
+             static_cast<double>(tweight));
+}
+
+
