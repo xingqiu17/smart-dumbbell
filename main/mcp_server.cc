@@ -19,6 +19,8 @@
 #include "remote_data_service.h"
 #include "cJSON.h"
 #include <ctime>
+#include "esp_timer.h"
+#include "db_connect.h"
 
 #define TAG "MCP"
 
@@ -39,6 +41,29 @@ McpServer::~McpServer() {
     tools_.clear();
 }
 
+
+bool McpServer::RefreshUser(int uid, const std::string* optional_json) {
+    User u{};
+    bool ok = false;
+
+    if (optional_json) {               // 优先用现成 JSON，避免额外 GET
+        ok = parse_user_json(*optional_json, u);
+    }
+    if (!ok) {                         // 解析失败或未提供 JSON，则后端拉取
+        ok = getUserInfo(uid, u);
+    }
+    if (!ok) return false;
+
+    {   // 写入内存副本并设定默认训练重量
+        std::lock_guard<std::mutex> lk(user_mu_);
+        user_current_ = u;
+        user_loaded_  = true;
+    }
+
+    return true;
+}
+
+
 void McpServer::AddCommonTools() {
     // To speed up the response time, we add the common tools to the beginning of
     // the tools list to utilize the prompt cache.
@@ -50,12 +75,18 @@ void McpServer::AddCommonTools() {
 
     // 获取用户数据工具
     AddTool("self.user.get_data",
-        "When the user asks for user-related data, use this tool to reply including gender, height, weight, birthday, and current training weight data.",
+        "When the user asks for user-related data, including name, gender, height, weight, birthday, train aim, and current training weight data,use this tool to reply what user asked. ",
         PropertyList({ Property("userId", kPropertyTypeInteger) }),
         [this](const PropertyList&) -> ReturnValue {
             int uid = this->current_user_id_;
             ESP_LOGI(TAG, "Tool self.user.get_data using stored userId=%d", uid);
-            return RemoteDataService::GetInstance().GetUserDataJson(uid);
+            // 你原有：取回 JSON
+            std::string js = RemoteDataService::GetInstance().GetUserDataJson(uid);
+
+            // 新增：用已拿到的 JSON 刷新本地 User（解析失败则内部会自己再 getUserInfo）
+            RefreshUser(uid, &js);
+
+            return js;  // 对外行为不变
         });
 
     // 修改昵称
@@ -67,61 +98,204 @@ void McpServer::AddCommonTools() {
         [this](const PropertyList& props) -> ReturnValue {
             int uid = this->current_user_id_;
             if (uid <= 0) return R"({"success":false,"message":"no_user"})";
+            RefreshUser(uid);
             auto name = props["name"].value<std::string>();
             ESP_LOGI(TAG, "set_name uid=%d, name=%s", uid, name.c_str());
             bool ok = RemoteDataService::GetInstance().UpdateName(uid, name);
+            if (ok) { // 写后：本地同步
+                std::lock_guard<std::mutex> lk(user_mu_);
+                if (user_loaded_) user_current_.name = name;
+            }
             return ok ? R"({"success":true})" : R"({"success":false})";
         });
 
     // 修改身体数据：birthday(YYYY-MM-DD)、height(cm)、weight(kg)、gender(0/1/2)
-    // 说明：当前 Property 仅支持 int/string/bool，为支持小数，height/weight 用 string 传，如 "172.5"
+    // 规则：只传你想修改的字段；
+    //  - birthday/height/weight 传空字符串 "" 表示保持当前值（也可以直接省略这个字段）；
+    //  - gender 传 -1 表示保持当前值（也可以直接省略这个字段）。
     AddTool("self.user.set_body",
-        "Update user's body data.Include birthday,height,weight and gender.About gender, 0 is unkonwn,1 is male,2 is female.",
+        "Update user's body data. Only include fields you want to change. "
+        "If you don't want to change a field: omit it (or use empty string for birthday/height/weight; use -1 for gender). "
+        "Fields: birthday(YYYY-MM-DD), height(cm as string), weight(kg as string), gender(0 unknown,1 male,2 female)."
+        "weight unit is kg, as usual,you can set the num what you have listened",
         PropertyList({
-            Property("birthday", kPropertyTypeString),       // "YYYY-MM-DD"
-            Property("height",   kPropertyTypeString),       // e.g. "172.0"
-            Property("weight",   kPropertyTypeString),       // e.g. "60.5"
-            Property("gender",   kPropertyTypeInteger, 0, 2) // 0..2
+            // 关键：给字符串字段默认值 ""，给 gender 允许 -1 并以 -1 作为默认值（=保持当前）
+            Property("birthday", kPropertyTypeString,  std::string("")),     // "" 或省略 = 保持
+            Property("height",   kPropertyTypeString,  std::string("")),     // "" 或省略 = 保持
+            Property("weight",   kPropertyTypeString,  std::string("")),     // "" 或省略 = 保持
+            Property("gender",   kPropertyTypeInteger, -1, -1, 2)            // -1 或省略 = 保持
         }),
         [this](const PropertyList& props) -> ReturnValue {
             int uid = this->current_user_id_;
             if (uid <= 0) return R"({"success":false,"message":"no_user"})";
+            RefreshUser(uid);
 
-            auto birthday = props["birthday"].value<std::string>();
-            float height  = 0.f, weight = 0.f;
-            try { height = std::stof(props["height"].value<std::string>()); } catch (...) {}
-            try { weight = std::stof(props["weight"].value<std::string>()); } catch (...) {}
-            int gender    = props["gender"].value<int>();
+            // 1) 基线：先用当前用户数据填满
+            User finalVals;
+            { std::lock_guard<std::mutex> lk(user_mu_); finalVals = user_current_; }
+
+            bool changed = false;
+
+            // 2) birthday：省略或 "" → 保持；非空 → 覆盖
+            try {
+                auto s = props["birthday"].value<std::string>();
+                if (!s.empty()) { finalVals.birthday = s; changed = true; }
+            } catch (...) { /* omitted: keep */ }
+
+            // —— 工具函数：转小写（仅ASCII），便于找 kg/g
+            auto toLowerAscii = [](std::string s) {
+                for (auto &ch : s) if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+                return s;
+            };
+
+            // —— 工具函数：解析体重为 kg
+            auto parse_weight_kg = [&](const std::string& s) -> std::optional<float> {
+                if (s.empty()) return std::nullopt;
+                float v = 0.f;
+                try { v = std::stof(s); } catch (...) { return std::nullopt; }
+
+                const std::string ls = toLowerAscii(s);
+                const bool has_kg  = (ls.find("kg") != std::string::npos) || (s.find("千克") != std::string::npos) || (s.find("公斤") != std::string::npos);
+                const bool has_g   = (ls.find("g")  != std::string::npos) || (s.find("克")  != std::string::npos);
+                const bool has_jin = (s.find("斤")  != std::string::npos);
+
+                float kg = v;
+                if (has_kg) {
+                    kg = v;                // 已是 kg
+                } else if (has_jin) {
+                    kg = v * 0.5f;         // 斤 → kg
+                } else if (has_g) {
+                    kg = v / 1000.f;       // g  → kg
+                } else {
+                    kg = v;                // 无单位：默认 kg
+                    // 兜底：若数值异常大（常见“把 g 当 kg”），自动按 g→kg 修正
+                    if (kg > 400.f && kg < 300000.f) kg = kg / 1000.f;
+                }
+
+                // 合理性检查（可按需放宽/收紧）
+                if (std::isnan(kg) || kg <= 0.f || kg > 500.f) return std::nullopt;
+                ESP_LOGI(TAG, "normalize weight: raw=\"%s\" -> %.2f kg (kg=%d g=%d jin=%d)",
+                        s.c_str(), kg, has_kg, has_g, has_jin);
+                return kg;
+            };
+
+            // —— 工具函数：解析身高为 cm
+            auto parse_height_cm = [&](const std::string& s) -> std::optional<float> {
+                if (s.empty()) return std::nullopt;
+                float v = 0.f;
+                try { v = std::stof(s); } catch (...) { return std::nullopt; }
+
+                const std::string ls = toLowerAscii(s);
+                const bool has_cm = (ls.find("cm") != std::string::npos) || (s.find("厘米") != std::string::npos);
+                const bool has_m  = ((ls.find("m") != std::string::npos) && (ls.find("cm") == std::string::npos)) || (s.find("米") != std::string::npos);
+
+                float cm = v;
+                if (has_cm) {
+                    cm = v;                // cm
+                } else if (has_m) {
+                    cm = v * 100.f;        // m → cm
+                } else {
+                    // 无单位：默认 cm；若数值很小（≤3），按米理解
+                    cm = (v <= 3.f ? v * 100.f : v);
+                }
+
+                if (std::isnan(cm) || cm <= 0.f || cm > 300.f) return std::nullopt;
+                ESP_LOGI(TAG, "normalize height: raw=\"%s\" -> %.2f cm (cm=%d m=%d)",
+                        s.c_str(), cm, has_cm, has_m);
+                return cm;
+            };
+
+            // 3) height：省略/"" → 保持；否则做单位归一化
+            try {
+                auto s = props["height"].value<std::string>();
+                if (!s.empty()) {
+                    if (auto h = parse_height_cm(s)) { finalVals.height = *h; changed = true; }
+                }
+            } catch (...) { /* omitted: keep */ }
+
+            // 4) weight：省略/"" → 保持；否则做单位归一化（kg）
+            try {
+                auto s = props["weight"].value<std::string>();
+                if (!s.empty()) {
+                    if (auto w = parse_weight_kg(s)) { finalVals.weight = *w; changed = true; }
+                }
+            } catch (...) { /* omitted: keep */ }
+
+            // 5) gender：省略或 -1 → 保持；0/1/2 → 覆盖
+            try {
+                int g = props["gender"].value<int>();
+                if (g != -1) { finalVals.gender = g; changed = true; }
+            } catch (...) { /* omitted: keep */ }
+
+            if (!changed) {
+                ESP_LOGI(TAG, "set_body uid=%d: no fields provided, skip update", uid);
+                return R"({"success":true,"message":"noop"})";
+            }
 
             ESP_LOGI(TAG, "set_body uid=%d, birthday=%s, h=%.2f, w=%.2f, g=%d",
-                    uid, birthday.c_str(), height, weight, gender);
+                    uid, finalVals.birthday.c_str(), finalVals.height, finalVals.weight, finalVals.gender);
 
-            bool ok = RemoteDataService::GetInstance().UpdateBody(uid, birthday, height, weight, gender);
+            // 5) 上传“填充后的最终值”
+            bool ok = RemoteDataService::GetInstance().UpdateBody(
+                uid, finalVals.birthday, finalVals.height, finalVals.weight, finalVals.gender);
+
+            if (ok) {
+                std::lock_guard<std::mutex> lk(user_mu_);
+                if (user_loaded_) user_current_ = finalVals;
+            }
             return ok ? R"({"success":true})" : R"({"success":false})";
         });
+
+
 
 
     // 修改训练目标/重量：aim、hwWeight(kg)
-    // 说明：hwWeight 允许小数，因此用 string 传，例如 "11.5"
+    // 说明里明确：不想改就“省略该字段”；若传了也可用哨兵（aim=-1 / hwWeight=""）表示保持当前
     AddTool("self.user.set_train_data",
-        "Update user's training aim and hwWeight(kg).About aim: 0 is no aim,1 is arm,2 is shoulder, 3 is chest,4 is back,5 is leg",
+        "Update user's training aim and hwWeight(kg). Only include fields you want to change. "
+        "If you don't want to change aim, omit it (or pass -1). "
+        "If you don't want to change hwWeight, omit it (or pass empty string). "
+        "Aim: 0 none,1 arm,2 shoulder,3 chest,4 back,5 leg."
+        "hwWeight unit: kg (can be float).If you listen Chinese 千克,please use 'kg' as unit.",
         PropertyList({
-            Property("aim",      kPropertyTypeInteger),
-            Property("hwWeight", kPropertyTypeString)   // e.g. "11.5"
+            Property("aim",      kPropertyTypeInteger, /*default*/ -1, /*min*/ -1, /*max*/ 5),
+            Property("hwWeight", kPropertyTypeString,  std::string(""))
         }),
         [this](const PropertyList& props) -> ReturnValue {
             int uid = this->current_user_id_;
             if (uid <= 0) return R"({"success":false,"message":"no_user"})";
+            RefreshUser(uid);
 
-            int   aim = props["aim"].value<int>();
-            float hw  = 0.f;
-            try { hw = std::stof(props["hwWeight"].value<std::string>()); } catch (...) {}
+            // 基线：用当前值填满
+            User finalVals;
+            { std::lock_guard<std::mutex> lk(user_mu_); finalVals = user_current_; }
 
-            ESP_LOGI(TAG, "set_train_data uid=%d, aim=%d, hwWeight=%.2f", uid, aim, hw);
+            // aim：若参数被省略 → 这里会抛异常，保持默认；若存在且 == -1 → 也保持默认
+            try {
+                int aim_in = props["aim"].value<int>();
+                if (aim_in != -1) finalVals.aim = aim_in;
+            } catch (...) { /* omitted: keep default */ }
 
-            bool ok = RemoteDataService::GetInstance().UpdateTrainData(uid, aim, hw);
+            // hwWeight：若参数被省略或空串/无效 → 保持默认；否则覆盖
+            try {
+                auto s = props["hwWeight"].value<std::string>();
+                if (!s.empty()) {
+                    try {
+                        float v = std::stof(s);
+                        if (!(std::isnan(v) || v < 0.0f)) finalVals.hwWeight = v;
+                    } catch (...) { /* parse failed: keep default */ }
+                }
+            } catch (...) { /* omitted: keep default */ }
+
+            ESP_LOGI(TAG, "set_train_data uid=%d, aim=%d, hwWeight=%.2f",
+                    uid, finalVals.aim, finalVals.hwWeight);
+
+            bool ok = RemoteDataService::GetInstance().UpdateTrainData(uid, finalVals.aim, finalVals.hwWeight);
+            if (ok) { std::lock_guard<std::mutex> lk(user_mu_); if (user_loaded_) user_current_ = finalVals; }
             return ok ? R"({"success":true})" : R"({"success":false})";
         });
+
+
 
     
 

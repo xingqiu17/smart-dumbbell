@@ -9,7 +9,9 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
-#include <math.h>   // for isnan, isinf, isfinite
+#include <math.h>   
+#include "db_connect.h"   
+#include <mutex>
 
 #include <cJSON.h>
 
@@ -30,6 +32,8 @@ private:
     bool has_default_value_;
     std::optional<int> min_value_;  // 新增：整数最小值
     std::optional<int> max_value_;  // 新增：整数最大值
+
+
 
 public:
     // Required field constructor
@@ -170,6 +174,14 @@ public:
         
         return result;
     }
+
+    bool Has(const std::string& name) const {
+        for (const auto& p : properties_) {
+            if (p.name() == name) return true;
+        }
+        return false;
+    }
+
 };
 
 class McpTool {
@@ -263,8 +275,8 @@ public:
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
     void SetCurrentUserId(int uid) { current_user_id_ = uid; }
-
     void SetCurrentUserTWeight(float tweight);
+    bool RefreshUser(int uid, const std::string* optional_json = nullptr);
 
 private:
     McpServer();
@@ -282,6 +294,9 @@ private:
     std::thread tool_call_thread_;
     int current_user_id_ = 0;
     float current_user_tweight_ = 0;
+    User        user_current_{};
+    bool        user_loaded_ = false;
+    std::mutex  user_mu_;
 };
 
 #endif // MCP_SERVER_H

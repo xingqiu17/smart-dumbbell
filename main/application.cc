@@ -88,6 +88,19 @@ static inline FusionQuaternion QuaternionConjugate(const FusionQuaternion& q)
 float rms_omega_y = 0.0f; // 用于计算平滑度的 Y 轴角速度 RMSb
 
 RepReport rep_report = { EX_UNKNOWN, 0, 0.0f }; // 当前动作计数报告
+
+
+struct TrainingItem { int type; int reps; float weight; };
+static constexpr int MAX_ITEMS = 32;
+
+static TrainingItem g_plan[MAX_ITEMS];
+static int  g_plan_sz = 0;
+static int  g_cur_idx = -1;
+
+static volatile bool g_item_running = false;   // 正在做某一组
+static volatile bool g_need_next    = false;   // 某组完成后置位，驱动切换
+
+
 //new
 
 #define WAKE_WORD_APPLY 0 //唤醒词是否启用    0 不启用    1 启用
@@ -115,6 +128,40 @@ struct ImuFrame {
 static constexpr size_t IMU_BUF_LEN = 128;     // 100 Hz 采样 ≈1.28 s
 static ImuFrame imuBuf[IMU_BUF_LEN];
 static size_t   wrIdx   = 0;                   // 写指针
+
+
+
+static void StartNextItem() {
+    rep_cnt = 0;
+    if (++g_cur_idx >= g_plan_sz) {
+        ESP_LOGI("TRAIN", "Plan finished: %d items done", g_plan_sz);
+        // 需要的话，这里可发一个 plan 完成的 JSON 给 App
+        return;
+    }
+
+    const TrainingItem& it = g_plan[g_cur_idx];
+    // 枚举值与你的 JSON type 对齐，直接强转即可
+    rep_report.ex   = static_cast<Exercise>(it.type);
+    rep_report.rep_idx = it.reps;   // 目标个数
+    // 如需把配重下发给硬件/电机，可在此处使用 it.weight
+
+    // 重置计数/状态机
+    is_rep_counting = true;
+    phase = PHASE_IDLE;
+    // 清零你在 imu_task 内部用到的统计变量（若有文件内静态，可在此处重置）
+
+    g_item_running = true;
+
+    ESP_LOGI("TRAIN", "Start item #%d/%d: type=%d reps=%d weight=%.2f",
+             g_cur_idx+1, g_plan_sz, it.type, it.reps, it.weight);
+}
+
+static void StartPlan() {
+    g_cur_idx = -1;
+    g_item_running = false;
+    g_need_next = false;
+    StartNextItem();
+}
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
@@ -596,8 +643,14 @@ void Application::imu_task(void* arg)
                     /* 你愿意的话再映射到 0–100 或做平滑 */
                     score = std::clamp(score, 0.f, 100.f);
 
-                    if(rep_cnt==rep_report.rep_idx)
-                    is_rep_counting = false; // 计数完成
+                    if (rep_cnt == rep_report.rep_idx) {
+                        is_rep_counting = false;
+                        g_item_running = false;
+                        Application::GetInstance().Schedule([]() {
+                            StartNextItem();
+                        });
+                    }
+
                     
                     /* 生成报告 */
                     RepReport rp2client;
@@ -948,6 +1001,7 @@ void Application::MessageProcessingTask(void* pv) {
 // 3) JSON 解析并分发逻辑
 void Application::handleStartTrainingJson(char* json)
 {
+
     cJSON* root = cJSON_Parse(json);
     if (!root) {
         ESP_LOGE(TAG, "invalid JSON: %s", json);
@@ -987,32 +1041,39 @@ void Application::handleStartTrainingJson(char* json)
 
 
     /* ---------- B. 处理训练计划 ---------- */
+    g_plan_sz = 0;
+    g_cur_idx = -1;
+
     cJSON* items = cJSON_GetObjectItem(root, "items");
     if (items && cJSON_IsArray(items)) {
-
-
-
-        int count = cJSON_GetArraySize(items);
-        for (int i = 0; i < count; ++i) {
+        const int count = cJSON_GetArraySize(items);
+        for (int i = 0; i < count && g_plan_sz < MAX_ITEMS; ++i) {
             cJSON* it = cJSON_GetArrayItem(items, i);
-            int type   = cJSON_GetObjectItem(it, "type")->valueint;
-            int reps   = cJSON_GetObjectItem(it, "reps")->valueint;
-            int weight = cJSON_GetObjectItem(it, "weight")->valueint;
+            cJSON* jt = cJSON_GetObjectItem(it, "type");
+            cJSON* jr = cJSON_GetObjectItem(it, "reps");
+            cJSON* jw = cJSON_GetObjectItem(it, "weight");
+            if (!jt || !jr || !jw || !cJSON_IsNumber(jt) || !cJSON_IsNumber(jr) || !cJSON_IsNumber(jw)) {
+                ESP_LOGW(TAG, "item[%d] missing fields or not number", i);
+                continue;
+            }
+            int   type   = jt->valueint;
+            int   reps   = jr->valueint;
+            float weight = (float)cJSON_GetNumberValue(jw);
 
-            // TODO: 调用你的训练逻辑，例如：
-            rep_cnt=0;
-            rep_report.rep_idx = reps;
-            phase   = PHASE_IDLE;
-            rep_report.ex = static_cast<Exercise>(type);
-            rep_report.score = 0.0f;
-            is_rep_counting = true;
-            // StartTrainingItem(sets, type, reps, weight);
-            ESP_LOGI(TAG, "[%d]  type=%d reps=%d weight=%d",
-                     i, type, reps, weight);
+            if (reps <= 0 || reps > 200)     { ESP_LOGW(TAG, "bad reps=%d", reps); continue; }
+            if (weight <= 0 || weight > 200) { ESP_LOGW(TAG, "bad weight=%.2f", weight); continue; }
+
+            g_plan[g_plan_sz++] = { type, reps, weight };
+            ESP_LOGI(TAG, "[%d] type=%d reps=%d weight=%.2f", i, type, reps, weight);
         }
     }
 
-    cJSON_Delete(root);
+    // 计划准备好就启动
+    if (g_plan_sz > 0) {
+        StartPlan();
+    } else {
+        ESP_LOGW(TAG, "Empty training plan.");
+    }
 }
 
 
