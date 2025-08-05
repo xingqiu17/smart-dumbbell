@@ -131,8 +131,6 @@ static constexpr size_t IMU_BUF_LEN = 128;     // 100 Hz 采样 ≈1.28 s
 static ImuFrame imuBuf[IMU_BUF_LEN];
 static size_t   wrIdx   = 0;                   // 写指针
 
-<<<<<<< HEAD
-=======
 
 static void FinishTraining() {
     ESP_LOGI("TRAIN", "Plan finished: %d items done", g_plan_sz);
@@ -140,7 +138,6 @@ static void FinishTraining() {
 }
 
 
->>>>>>> bdeb59a8e5785e82edf18eb1b7196e4ae9a5b849
 static void StartNextItem() {
     rep_cnt = 0;
     if (++g_cur_idx >= g_plan_sz) {
