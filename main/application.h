@@ -130,7 +130,6 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
     Settings& GetPairingSettings() { return *pairing_settings_;}
-    /* ────────────────────────── 新增 ────────────────────────── */
     /** JSON 消息队列，存 strdup() 出来的 char* */
     static QueueHandle_t s_jsonQueue;
 
@@ -143,8 +142,17 @@ public:
     /** 真正解析并分发 start_training JSON 的函数 */
     void handleStartTrainingJson(char* json);
 
+<<<<<<< HEAD
     static void score_poll_task(void*);
     /* ────────────────────────── 新增 End ────────────────────────── */
+=======
+    /** 跳过当前休息，进入下一组 */
+    void SkipRest();
+
+    /** 退出整个训练流程 */
+    void ExitTraining();
+
+>>>>>>> bdeb59a8e5785e82edf18eb1b7196e4ae9a5b849
 
 
     
