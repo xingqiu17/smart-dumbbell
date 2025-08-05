@@ -19,6 +19,8 @@
 #include <esp_sleep.h>
 #include "boards/atoms3r-echo-base/config.h"
 #include <limits>
+#include <vector>
+#include <ctime>
 #include "mdns.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -97,6 +99,15 @@ static TrainingItem g_plan[MAX_ITEMS];
 static int  g_plan_sz = 0;
 static int  g_cur_idx = -1;
 
+struct RecordItem {
+    int type;        // 练习类型
+    int num;         // 目标个数
+    int tOrder;      // 组序号（1 起）
+    float tWeight;   // 配重
+    std::vector<float> scores; // 每次动作的得分
+};
+static std::vector<RecordItem> g_record_items;
+
 static volatile bool g_item_running = false;   // 正在做某一组
 static volatile bool g_need_next    = false;   // 某组完成后置位，驱动切换
 
@@ -132,9 +143,57 @@ static ImuFrame imuBuf[IMU_BUF_LEN];
 static size_t   wrIdx   = 0;                   // 写指针
 
 
+static std::string CurrentDateISO() {
+    time_t now = time(nullptr);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    char buf[11];
+    strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
+    return std::string(buf);
+}
+
 static void FinishTraining() {
     ESP_LOGI("TRAIN", "Plan finished: %d items done", g_plan_sz);
-    // TODO: write results to database
+    cJSON* items = cJSON_CreateArray();
+    for (const auto& it : g_record_items) {
+        cJSON* obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(obj, "type",    it.type);
+        cJSON_AddNumberToObject(obj, "num",     it.num);
+        cJSON_AddNumberToObject(obj, "tOrder",  it.tOrder);
+        cJSON_AddNumberToObject(obj, "tWeight", it.tWeight);
+        int avg = 0;
+        if (!it.scores.empty()) {
+            float sum = 0.0f;
+            for (float s : it.scores) sum += s;
+            avg = static_cast<int>(sum / it.scores.size() + 0.5f);
+        }
+        cJSON_AddNumberToObject(obj, "avgScore", avg);
+
+        cJSON* works = cJSON_CreateArray();
+        for (size_t j = 0; j < it.scores.size(); ++j) {
+            cJSON* w = cJSON_CreateObject();
+            cJSON_AddNumberToObject(w, "acOrder", (int)j + 1);
+            cJSON_AddNumberToObject(w, "score",   static_cast<int>(it.scores[j] + 0.5f));
+            cJSON_AddItemToArray(works, w);
+        }
+        cJSON_AddItemToObject(obj, "works", works);
+        cJSON_AddItemToArray(items, obj);
+    }
+
+    char* raw = cJSON_PrintUnformatted(items);
+    std::string items_json = raw ? raw : "[]";
+    if (raw) cJSON_free(raw);
+    cJSON_Delete(items);
+
+    std::string resp;
+    auto& rds = RemoteDataService::GetInstance();
+    std::string date = CurrentDateISO();
+    if (rds.CreateDayRecord(date, items_json, resp)) {
+        ESP_LOGI("TRAIN", "Upload training record ok");
+    } else {
+        ESP_LOGE("TRAIN", "Upload training record failed");
+    }
+    g_record_items.clear();
 }
 
 
@@ -163,6 +222,10 @@ static void StartNextItem() {
 }
 
 static void StartPlan() {
+    g_record_items.clear();
+    for (int i = 0; i < g_plan_sz; ++i) {
+        g_record_items.push_back({g_plan[i].type, 0, i + 1, g_plan[i].weight, {}});
+    }
     g_cur_idx = -1;
     g_item_running = false;
     g_need_next = false;
@@ -175,6 +238,9 @@ static void RestTimerCallback(void* arg) {
 }
 
 static void EnterRest() {
+     if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
+        g_record_items[g_cur_idx].num = rep_cnt;  // 保存实际个数
+    }
     if (g_cur_idx >= g_plan_sz - 1) {
         FinishTraining();
         return;
@@ -721,6 +787,13 @@ void Application::imu_task(void* arg)
                     rp2client.rep_idx  = rep_cnt;
                     rp2client.score    = score;
                     send_rep_json(rp2client);
+
+                    // —— 每完成一次动作就把分数和次数写入当前记录 —— 
+                    if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
+                        g_record_items[g_cur_idx].scores.push_back(score);
+                        g_record_items[g_cur_idx].num = rep_cnt;  // 同步累计次数，避免只在 EnterRest 里赋值
+                    }
+
 
                     /* 保存最近 N 次得分做滑动平均 */
                     static constexpr int N = 5;
@@ -2193,6 +2266,9 @@ void Application::score_poll_task(void*){
             rp1.rep_idx  = rep_cnt;           // 最近一次完成的编号
             rp1.score    = sc;                // 服务器返回分
             send_rep_json(rp1);               // 发给 APP
+            if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
+                g_record_items[g_cur_idx].scores.push_back(sc);
+            }
             ESP_LOGI("FIT", "Score: %.2f, Exercise: %d, Rep Index: %d", sc, rp1.ex, rep_cnt);
         }
         vTaskDelay(pdMS_TO_TICKS(50));

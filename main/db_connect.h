@@ -81,6 +81,16 @@ bool createPlanOfDay(int userId, const std::string& date,
                      const std::string& items_json,
                      std::string& out_json);
 
+/**
+ * 创建某用户某日的一条训练记录（含动作明细及评分）
+ * POST /api/log/session
+ * @param items_json 形如：[{"type":1,"num":12,"tOrder":1,"tWeight":10,"avgScore":90,
+ *                           "works":[{"acOrder":1,"score":95}, ...]}, ...]
+ */
+bool createRecordOfDay(int userId, const std::string& date,
+                       const std::string& items_json,
+                       std::string& out_json);
+
 
 bool getUserInfo(int userId, User& out_user);
 

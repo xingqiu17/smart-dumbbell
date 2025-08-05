@@ -167,3 +167,21 @@ bool RemoteDataService::CreateDayPlan(int userId, const std::string& date,
     return true;
 }
 
+
+/* === 训练记录：创建 session + items === */
+bool RemoteDataService::CreateDayRecord(int userId, const std::string& date,
+                                        const std::string& items_json,
+                                        std::string& out_json)
+{
+    ESP_LOGI(TAG_RDS, "CreateDayRecord uid=%d date=%s items=%s",
+             userId, date.c_str(), items_json.c_str());
+
+    std::string resp;
+    if (!createRecordOfDay(userId, date, items_json, resp)) {
+        ESP_LOGE(TAG_RDS, "CreateDayRecord(uid=%d) failed", userId);
+        return false;
+    }
+    out_json.swap(resp);  // 返回后端的单条 LogDayResp（session + items）
+    ESP_LOGI(TAG_RDS, "CreateDayRecord ok");
+    return true;
+}

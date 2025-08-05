@@ -223,5 +223,42 @@ bool createPlanOfDay(int userId, const std::string& date,
 }
 
 
+// —— 训练记录：创建某日训练记录 ——
+// items_json 必须是 JSON 数组字符串（包含 avgScore 及 works 数组）
+bool createRecordOfDay(int userId, const std::string& date,
+                       const std::string& items_json,
+                       std::string& out_json) {
+    // 构建请求体：{"userId":..,"date":"YYYY-MM-DD","items":[...]}
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "userId", userId);
+    cJSON_AddStringToObject(root, "date", date.c_str());
+
+    cJSON* items = cJSON_Parse(items_json.c_str());
+    if (!items || !cJSON_IsArray(items)) {
+        ESP_LOGE(TAG, "createRecordOfDay: items_json is not a valid JSON array: %s",
+                 items_json.c_str());
+        if (items) cJSON_Delete(items);
+        cJSON_Delete(root);
+        return false;
+    }
+    cJSON_AddItemToObject(root, "items", items);
+
+    char* raw = cJSON_PrintUnformatted(root);
+    std::string payload = raw ? raw : "{}"; // 构造请求体
+    if (raw) cJSON_free(raw);
+    cJSON_Delete(root);
+
+    std::string body;
+    esp_err_t err = http_request(HTTP_METHOD_POST,
+                                 "http://154.9.24.233:8080/api/log/session",
+                                 &payload, body, "application/json");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "createRecordOfDay failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "createRecordOfDay OK (len=%d)", (int)body.size());
+    out_json.swap(body);
+    return true;
+}
 
 

@@ -65,6 +65,20 @@ public:
         return CreateDayPlan(current_user_id_, date, items_json, out_json);
     }
 
+
+     // ===== 训练记录 =====
+
+    // —— 创建：一次性保存 session + items + works
+    bool CreateDayRecord(int userId, const std::string& date,
+                         const std::string& items_json, std::string& out_json);
+
+    // —— 便捷封装：使用当前 uid
+    bool CreateDayRecord(const std::string& date,
+                         const std::string& items_json, std::string& out_json) {
+        if (current_user_id_ < 0) { out_json = R"({"success":false,"message":"user not bound"})"; return false; }
+        return CreateDayRecord(current_user_id_, date, items_json, out_json);
+    }
+
 private:
     RemoteDataService() = default;
     RemoteDataService(const RemoteDataService&)            = delete;
