@@ -100,7 +100,9 @@ static int  g_cur_idx = -1;
 static volatile bool g_item_running = false;   // 正在做某一组
 static volatile bool g_need_next    = false;   // 某组完成后置位，驱动切换
 
-
+static volatile bool g_in_rest      = false;   // 休息模式
+static esp_timer_handle_t rest_timer_handle = nullptr;
+static constexpr uint64_t REST_DURATION_US = 5 * 1000000ULL; // 5s
 //new
 
 #define WAKE_WORD_APPLY 0 //唤醒词是否启用    0 不启用    1 启用
@@ -130,12 +132,16 @@ static ImuFrame imuBuf[IMU_BUF_LEN];
 static size_t   wrIdx   = 0;                   // 写指针
 
 
+static void FinishTraining() {
+    ESP_LOGI("TRAIN", "Plan finished: %d items done", g_plan_sz);
+    // TODO: write results to database
+}
+
 
 static void StartNextItem() {
     rep_cnt = 0;
     if (++g_cur_idx >= g_plan_sz) {
-        ESP_LOGI("TRAIN", "Plan finished: %d items done", g_plan_sz);
-        // 需要的话，这里可发一个 plan 完成的 JSON 给 App
+        FinishTraining();
         return;
     }
 
@@ -161,6 +167,32 @@ static void StartPlan() {
     g_item_running = false;
     g_need_next = false;
     StartNextItem();
+}
+
+static void RestTimerCallback(void* arg) {
+    g_in_rest = false;
+    StartNextItem();
+}
+
+static void EnterRest() {
+    if (g_cur_idx >= g_plan_sz - 1) {
+        FinishTraining();
+        return;
+    }
+    g_in_rest = true;
+    if (!rest_timer_handle) {
+        esp_timer_create_args_t args = {
+            .callback = &RestTimerCallback,
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "rest_timer",
+            .skip_unhandled_events = true
+        };
+        esp_timer_create(&args, &rest_timer_handle);
+    }
+    esp_timer_stop(rest_timer_handle);
+    esp_timer_start_once(rest_timer_handle, REST_DURATION_US);
+    ESP_LOGI("TRAIN", "Resting for %.1f seconds", REST_DURATION_US / 1e6);
 }
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -647,7 +679,7 @@ void Application::imu_task(void* arg)
                         is_rep_counting = false;
                         g_item_running = false;
                         Application::GetInstance().Schedule([]() {
-                            StartNextItem();
+                            EnterRest();
                         });
                     }
 
@@ -1076,6 +1108,27 @@ void Application::handleStartTrainingJson(char* json)
     }
 }
 
+
+void Application::SkipRest() {
+    if (g_in_rest) {
+        if (rest_timer_handle) {
+            esp_timer_stop(rest_timer_handle);
+        }
+        g_in_rest = false;
+        StartNextItem();
+    }
+}
+
+void Application::ExitTraining() {
+    if (g_in_rest && rest_timer_handle) {
+        esp_timer_stop(rest_timer_handle);
+        g_in_rest = false;
+    }
+    is_rep_counting = false;
+    g_item_running = false;
+    g_cur_idx = g_plan_sz;
+    FinishTraining();
+}
 
 void Application::PlaySound(const std::string_view& sound) {
     // Wait for the previous sound to finish
