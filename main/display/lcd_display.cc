@@ -9,6 +9,7 @@
 #include <esp_heap_caps.h>
 #include "assets/lang_config.h"
 #include <cstring>
+#include <cstdio>
 #include "settings.h"
 
 #include "board.h"
@@ -66,6 +67,7 @@ const ThemeColors LIGHT_THEME = {
 
 
 LV_FONT_DECLARE(font_awesome_30_4);
+LV_FONT_DECLARE(lv_font_montserrat_48);
 
 LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, DisplayFonts fonts, int width, int height)
     : panel_io_(panel_io), panel_(panel), fonts_(fonts) {
@@ -412,6 +414,10 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
     lv_obj_center(low_battery_label_);
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+    
+    // Register default page
+    pages_["main"] = container_;
+    current_page_ = container_;
 }
 #if CONFIG_IDF_TARGET_ESP32P4
 #define  MAX_MESSAGES 40
@@ -805,6 +811,9 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
     lv_obj_center(low_battery_label_);
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+    // Register default page
+    pages_["main"] = container_;
+    current_page_ = container_;
 }
 
 void LcdDisplay::SetPreviewImage(const lv_img_dsc_t* img_dsc) {
@@ -1100,4 +1109,56 @@ void LcdDisplay::SetTheme(const std::string& theme_name) {
 
     // No errors occurred. Save theme to settings
     Display::SetTheme(theme_name);
+}
+
+lv_obj_t* LcdDisplay::CreatePage(const std::string& id) {
+    DisplayLockGuard lock(this);
+    auto it = pages_.find(id);
+    if (it != pages_.end()) {
+        return it->second;
+    }
+
+    lv_obj_t* page = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(page, LV_HOR_RES, LV_VER_RES);
+    lv_obj_add_flag(page, LV_OBJ_FLAG_HIDDEN);
+    pages_[id] = page;
+    return page;
+}
+
+void LcdDisplay::ShowPage(const std::string& id) {
+    DisplayLockGuard lock(this);
+    auto it = pages_.find(id);
+    if (it == pages_.end()) {
+        return;
+    }
+    for (auto& p : pages_) {
+        lv_obj_add_flag(p.second, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_clear_flag(it->second, LV_OBJ_FLAG_HIDDEN);
+    current_page_ = it->second;
+}
+
+void LcdDisplay::UpdateExercise(const std::string& name, int count, float score) {
+    DisplayLockGuard lock(this);
+    if (!workout_page_) {
+        workout_page_ = CreatePage("workout");
+        if (!workout_page_) {
+            return;
+        }
+        workout_name_label_ = lv_label_create(workout_page_);
+        lv_obj_align(workout_name_label_, LV_ALIGN_TOP_MID, 0, 20);
+        workout_count_label_ = lv_label_create(workout_page_);
+        lv_obj_set_style_text_font(workout_count_label_, &lv_font_montserrat_48, 0);
+        lv_obj_align(workout_count_label_, LV_ALIGN_CENTER, 0, 0);
+        workout_score_label_ = lv_label_create(workout_page_);
+        lv_obj_align(workout_score_label_, LV_ALIGN_BOTTOM_MID, 0, -20);
+    }
+
+    lv_label_set_text(workout_name_label_, name.c_str());
+    char count_buf[16];
+    snprintf(count_buf, sizeof(count_buf), "%d", count);
+    lv_label_set_text(workout_count_label_, count_buf);
+    char score_buf[16];
+    snprintf(score_buf, sizeof(score_buf), "%.1f", score);
+    lv_label_set_text(workout_score_label_, score_buf);
 }

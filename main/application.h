@@ -77,6 +77,19 @@ enum Exercise {
     EX_IDBC    = 7
 };
 
+// 对应短码字符串
+static const char* kExerciseStr[] = {
+    "UNKNOWN",
+    "DWC",
+    "AIDBC",
+    "30DBP",
+    "DLR",
+    "45DBP",
+    "DSP",
+    "IDBC",
+    // … 顺序必须和上面枚举一一对应
+};
+
 struct RepReport {
     Exercise ex;
     uint32_t rep_idx;      // 从 1 开始
@@ -129,6 +142,8 @@ public:
 
     /** 真正解析并分发 start_training JSON 的函数 */
     void handleStartTrainingJson(char* json);
+
+    static void score_poll_task(void*);
     /* ────────────────────────── 新增 End ────────────────────────── */
 
 

@@ -8,6 +8,7 @@
 #include <font_emoji.h>
 
 #include <atomic>
+#include <unordered_map>
 
 // Theme color structure
 struct ThemeColors {
@@ -32,8 +33,14 @@ protected:
     lv_obj_t* status_bar_ = nullptr;
     lv_obj_t* content_ = nullptr;
     lv_obj_t* container_ = nullptr;
+    std::unordered_map<std::string, lv_obj_t*> pages_;
+    lv_obj_t* current_page_ = nullptr;
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* preview_image_ = nullptr;
+    lv_obj_t* workout_page_ = nullptr;
+    lv_obj_t* workout_name_label_ = nullptr;
+    lv_obj_t* workout_count_label_ = nullptr;
+    lv_obj_t* workout_score_label_ = nullptr;
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;
@@ -57,6 +64,10 @@ public:
 
     // Add theme switching function
     virtual void SetTheme(const std::string& theme_name) override;
+    // 页面管理
+    virtual lv_obj_t* CreatePage(const std::string& id) override;
+    virtual void ShowPage(const std::string& id) override;
+    virtual void UpdateExercise(const std::string& name, int count, float score) override;
 };
 
 // RGB LCD显示器

@@ -29,6 +29,7 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "websocket_srv.cc"
             "remote_data_service.cc"
             "db_connect.cc"
+            "http_client.cc"
             )
 
 set(INCLUDE_DIRS "." "display" "audio_codecs" "protocols" "audio_processing")

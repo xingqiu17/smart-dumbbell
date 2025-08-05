@@ -30,6 +30,13 @@ public:
     virtual std::string GetTheme() { return current_theme_name_; }
     virtual void UpdateStatusBar(bool update_all = false);
 
+    // 页面管理接口
+    virtual lv_obj_t* CreatePage(const std::string& id);
+    virtual void ShowPage(const std::string& id);
+
+        // 训练信息更新
+    virtual void UpdateExercise(const std::string& name, int count, float score);
+
     inline int width() const { return width_; }
     inline int height() const { return height_; }
 

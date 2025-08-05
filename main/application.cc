@@ -25,21 +25,13 @@
 #include "settings.h"
 #include "remote_data_service.h" 
 #include "websocket_srv.h" 
+#include "http_client.h"
 
 
 extern "C" {
 #include "FusionAhrs.h"
 #include "FusionMath.h"
-#include "rep_scorer.h"
 }
-
-static Eloquent::ML::Port::RandomForestRegressor_DWC repModel_DWC; // 模型
-//static Eloquent::ML::Port::RandomForestRegressor_30DBP repModel_30DBP; // 模型
-// static Eloquent::ML::Port::RandomForestRegressor_45DBP repModel_45DBP; // 模型
-// static Eloquent::ML::Port::RandomForestRegressor_DLR repModel_DLR; // 模型
-//static Eloquent::ML::Port::RandomForestRegressor_IDBC repModel_IDBC; // 模型
-//static Eloquent::ML::Port::RandomForestRegressor_AIDBC repModel_AIDBC; // 模型
-//static Eloquent::ML::Port::RandomForestRegressor_DSP repModel_DSP; // 模型
 
 enum Axis {
     AXIS_X = 0,
@@ -72,6 +64,14 @@ static const RepAlgoCfg kAlgoCfg[] = {
  /* EX_IDBC    */ { 12.5f*DEG2RAD, 2.5f*DEG2RAD, 1, "repModel_IDBC" },
 };
 
+// ========== 1.1 发送 / 接收通道 ==========
+extern esp_err_t sendToServer(const char* json);         // websocket_srv.h 提供
+extern bool      fetchScore(float& score_out);           // websocket_srv.cc 里实现
+
+// ========== 1.2 rep 采样缓存 ==========
+static constexpr int MAX_RAW_FRAMES = 400;               // ≤ 4 s@100 Hz
+static float seqBuf[MAX_RAW_FRAMES][6];                  // gx gy gz ax ay az
+static int   seqLen = 0;                                 // 当前写指针
 
 static inline FusionQuaternion QuaternionConjugate(const FusionQuaternion& q)
 {
@@ -128,8 +128,6 @@ struct ImuFrame {
 static constexpr size_t IMU_BUF_LEN = 128;     // 100 Hz 采样 ≈1.28 s
 static ImuFrame imuBuf[IMU_BUF_LEN];
 static size_t   wrIdx   = 0;                   // 写指针
-
-
 
 static void StartNextItem() {
     rep_cnt = 0;
@@ -476,7 +474,16 @@ void Application::imu_task(void* arg)
         wrIdx = (wrIdx + 1) % IMU_BUF_LEN;
  
         
-
+                        // ***** 在读完 ax…gz 之后 *****
+        if (seqLen < MAX_RAW_FRAMES) {
+            seqBuf[seqLen][0] = gx;  
+            seqBuf[seqLen][1] = gy;
+            seqBuf[seqLen][2] = gz;
+            seqBuf[seqLen][3] = ax;
+            seqBuf[seqLen][4] = ay;
+            seqBuf[seqLen][5] = az;
+            ++seqLen;
+        }
 
             // 3) 取俯仰角
                         /* ---------- 计数 & 分类核心 ---------- */
@@ -608,38 +615,7 @@ void Application::imu_task(void* arg)
                     float score = 0.0f; // 模型输出分数
                     int exercise = rep_report.ex; // 当前动作类型
                     /* ------- 调用模型 -------- */
-                    switch(exercise) {
-                        case EX_DWC: {
-                            score = repModel_DWC.predict(features);   // 返回的就是训练脚本里的 y
-                            break;
-                        }
-                        // case EX_30DBP: {
-                        //     score = repModel_30DBP.predict(features);   // 返回的就是训练脚本里的 y
-                        //     break;
-                        // }
-                        // case EX_45DBP: {
-                        //     score = repModel_45DBP.predict(features);   // 返回的就是训练脚本里的 y
-                        //     break;
-                        // }
-                        // case EX_DLR: {
-                        //     score = repModel_DLR.predict(features);   // 返回的就是训练脚本里的 y
-                        //     break;
-                        // }
-                        // case EX_IDBC: {
-                        //     score = repModel_IDBC.predict(features);   // 返回的就是训练脚本里的 y
-                        //     break;
-                        // }
-                        // case EX_AIDBC: {
-                        //     score = repModel_AIDBC.predict(features);   // 返回的就是训练脚本里的 y
-                        //     break;
-                        // }
-                        // case EX_DSP: {
-                        //     score = repModel_DSP.predict(features);   // 返回的就是训练脚本里的 y
-                        //     break;
-                        // }
-                        default:
-                            ESP_LOGE("FIT", "Unknown exercise type: %d", rep_report.ex);
-                    }
+                    
                     /* 你愿意的话再映射到 0–100 或做平滑 */
                     score = std::clamp(score, 0.f, 100.f);
 
@@ -650,7 +626,60 @@ void Application::imu_task(void* arg)
                             StartNextItem();
                         });
                     }
+                    
+                    
+                    /* ---------- 3.1 200×6 重采样 ---------- */
+                    constexpr int TARGET_LEN = 200;
+                    constexpr int MAX_JSON   = 12 * TARGET_LEN * 6 + 160;   // 15 KB 裁剪裕量
+                    static char   jsonBuf[MAX_JSON];
 
+                    char *p = jsonBuf;
+                    int  n  = snprintf(                     // 先写头
+                            p, MAX_JSON,
+                            "{\"code\":\"%s\",\"rep\":%d,\"seq\":[",
+                            kExerciseStr[rep_report.ex],    // ★ 确保字符串数组里和服务器端一致
+                            rep_cnt);
+                    if (n <= 0 || n >= MAX_JSON) return;    // 理论不会
+
+                    p += n;                                 // p 指向下一写入位置
+
+                    for (int k = 0; k < TARGET_LEN; ++k) {
+                        float idx = k * (seqLen - 1.0f) / (TARGET_LEN - 1); // 连续坐标 0…len-1
+                        int   i0  = (int)idx;
+                        float t   = idx - i0;
+
+                        float frame[6];
+                        if (i0 >= seqLen - 1) {             // ★ 边界：最后一个点直接拷贝
+                            memcpy(frame, seqBuf[seqLen - 1], sizeof(frame));
+                        } else {
+                            for (int c = 0; c < 6; ++c)
+                                frame[c] = seqBuf[i0][c] * (1 - t) + seqBuf[i0 + 1][c] * t;
+                        }
+
+                        n = snprintf(p, MAX_JSON - (p - jsonBuf),
+                                    "[%.5f,%.5f,%.5f,%.5f,%.5f,%.5f]%s",
+                                    frame[0], frame[1], frame[2],
+                                    frame[3], frame[4], frame[5],
+                                    (k == TARGET_LEN - 1 ? "]}" : ","));
+                        if (n <= 0 || n >= MAX_JSON - (p - jsonBuf)) {
+                            ESP_LOGE("JSON", "jsonBuf overflow!");
+                            return;                         // 保护：不发送不完整 JSON
+                        }
+                        p += n;
+                    }
+
+                    /* ---------- 3.2 发送 ---------- */
+                    * p = '\0';                             // 保险：确认以 0 结尾
+                    esp_err_t err = sendToServer(jsonBuf);
+                    if (err != ESP_OK) {
+                        ESP_LOGE("HTTP_SRV", "sendToServer failed: %s", esp_err_to_name(err));
+                    }
+                    else{
+                        ESP_LOGI("HTTP_SRV", "sendToServer OK: ");
+                    }
+
+                    /* 清空缓存，准备下一 rep */
+                    seqLen = 0;
                     
                     /* 生成报告 */
                     RepReport rp2client;
@@ -2085,6 +2114,20 @@ void Application::SetAecMode(AecMode mode) {
     });
 }
 
+void Application::score_poll_task(void*){
+    float sc;
+    while (true){
+        if (fetchScore(sc)){
+            RepReport rp1;                    // 根据你已有结构
+            rp1.ex       = rep_report.ex;
+            rp1.rep_idx  = rep_cnt;           // 最近一次完成的编号
+            rp1.score    = sc;                // 服务器返回分
+            send_rep_json(rp1);               // 发给 APP
+            ESP_LOGI("FIT", "Score: %.2f, Exercise: %d, Rep Index: %d", sc, rp1.ex, rep_cnt);
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
 
 
 

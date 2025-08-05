@@ -248,3 +248,16 @@ void Display::SetTheme(const std::string& theme_name) {
     Settings settings("display", true);
     settings.SetString("theme", theme_name);
 }
+
+lv_obj_t* Display::CreatePage(const std::string& id) {
+    // Base display does not support pages
+    return nullptr;
+}
+
+void Display::ShowPage(const std::string& id) {
+    // Base display does not implement page switching
+}
+
+void Display::UpdateExercise(const std::string& name, int count, float score) {
+    // Base display does not show exercise info
+}
