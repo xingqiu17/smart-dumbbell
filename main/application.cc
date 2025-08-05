@@ -1070,36 +1070,50 @@ void Application::handleStartTrainingJson(char* json)
         ESP_LOGE(TAG, "invalid JSON: %s", json);
         return;
     }
-    /* ---------- A. 处理 setUser ---------- */
+     /* ---------- A. 处理事件 ---------- */
     const cJSON* event = cJSON_GetObjectItemCaseSensitive(root, "event");
-    if (cJSON_IsString(event) && strcmp(event->valuestring, "setUser") == 0) {
-        int uid = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "userId"));
+    if (cJSON_IsString(event)) {
+        if (strcmp(event->valuestring, "setUser") == 0) {
+            int uid = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "userId"));
 
-        // 解析可选的 hwWeight（支持 number 或 string）
-        float hw = -1.0;
-        const cJSON* jhw = cJSON_GetObjectItemCaseSensitive(root, "hwWeight");
-        if (cJSON_IsNumber(jhw)) {
-            hw = jhw->valuedouble;
-        } else if (cJSON_IsString(jhw) && jhw->valuestring) {
-            try { hw = std::stof(jhw->valuestring); } catch (...) { hw = -1.0; }
-        }
-
-        if (uid > 0) {
-            RemoteDataService::GetInstance().SetCurrentUserId(uid);
-
-            if (hw > 0.0) {
-                // 将当前配重存到 MCP 层，供后续 create_day 缺省使用
-                McpServer::GetInstance().SetCurrentUserTWeight(hw);
-                ESP_LOGI(TAG, "Bound userId=%d, hwWeight=%.3f", uid, hw);
-            } else {
-                ESP_LOGI(TAG, "Bound userId=%d (no valid hwWeight provided)", uid);
+            // 解析可选的 hwWeight（支持 number 或 string）
+            float hw = -1.0;
+            const cJSON* jhw = cJSON_GetObjectItemCaseSensitive(root, "hwWeight");
+            if (cJSON_IsNumber(jhw)) {
+                hw = jhw->valuedouble;
+            } else if (cJSON_IsString(jhw) && jhw->valuestring) {
+                try { hw = std::stof(jhw->valuestring); } catch (...) { hw = -1.0; }
             }
 
-            sendToClient(R"({"success":true,"event":"user_bound"})");
-            McpServer::GetInstance().SetCurrentUserId(uid);
+            if (uid > 0) {
+                RemoteDataService::GetInstance().SetCurrentUserId(uid);
+            
+
+                if (hw > 0.0) {
+                    // 将当前配重存到 MCP 层，供后续 create_day 缺省使用
+                    McpServer::GetInstance().SetCurrentUserTWeight(hw);
+                    ESP_LOGI(TAG, "Bound userId=%d, hwWeight=%.3f", uid, hw);
+                } else {
+                    ESP_LOGI(TAG, "Bound userId=%d (no valid hwWeight provided)", uid);
+                }
+
+                sendToClient(R"({"success":true,"event":"user_bound"})");
+                McpServer::GetInstance().SetCurrentUserId(uid);
+            }
+            cJSON_Delete(root);
+            return;
+        } else if (strcmp(event->valuestring, "skip_rest") == 0) {
+            ESP_LOGI(TAG, "Received skip_rest event");
+            SkipRest();
+            cJSON_Delete(root);
+            return;
+        } else if (strcmp(event->valuestring, "exit_training") == 0) {
+            ESP_LOGI(TAG, "Received exit_training event");
+            ExitTraining();
+            cJSON_Delete(root);
+            return;
+
         }
-        cJSON_Delete(root);
-        return;
     }
 
 
@@ -1141,6 +1155,7 @@ void Application::handleStartTrainingJson(char* json)
 
 
 void Application::SkipRest() {
+
     if (g_in_rest) {
         if (rest_timer_handle) {
             esp_timer_stop(rest_timer_handle);

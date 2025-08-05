@@ -109,6 +109,10 @@ static esp_err_t ws_handler(httpd_req_t *req)
             free(jsonCopy);
         }
     }
+    else if (msg.find("\"event\":\"skip_rest\"") != std::string::npos ||
+             msg.find("\"event\":\"exit_training\"") != std::string::npos) {
+        Application::GetInstance().handleStartTrainingJson((char*)frame.payload);
+    }
     else {
         // —— 保留 echo 逻辑（可选） ——  
         httpd_ws_frame_t resp;
