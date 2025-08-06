@@ -79,6 +79,10 @@ public:
         return CreateDayRecord(current_user_id_, date, items_json, out_json);
     }
 
+
+    // 直接按 sessionId 将计划标记为完成
+    bool MarkPlanCompleteById(int sessionId);
+
 private:
     RemoteDataService() = default;
     RemoteDataService(const RemoteDataService&)            = delete;

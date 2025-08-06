@@ -28,6 +28,8 @@
 #include "remote_data_service.h" 
 #include "websocket_srv.h" 
 #include "http_client.h"
+#include <mutex>
+
 
 
 extern "C" {
@@ -129,6 +131,12 @@ static float pMax, pMin, rMax, rMin;
 static int rep_cnt=0;
 bool is_rep_counting = false; // 是否正在计数
 
+// 计划会话ID缓存（-1 表示未知）
+static int g_plan_session_id = -1;
+
+static std::mutex g_record_mtx;
+
+
 
 
 // application.cc 里（建议在最前面 IMU 相关静态变量附近）
@@ -153,6 +161,10 @@ static std::string CurrentDateISO() {
 }
 
 static void FinishTraining() {
+
+    if (g_cur_idx >= 0 && g_cur_idx < g_plan_sz && g_cur_idx < (int)g_record_items.size()) {
+    g_record_items[g_cur_idx].num = rep_cnt;
+    }
     ESP_LOGI("TRAIN", "Plan finished: %d items done", g_plan_sz);
     cJSON* items = cJSON_CreateArray();
     for (const auto& it : g_record_items) {
@@ -194,7 +206,19 @@ static void FinishTraining() {
         ESP_LOGE("TRAIN", "Upload training record failed");
     }
     g_record_items.clear();
+
+    if (g_plan_session_id > 0) {
+            if (rds.MarkPlanCompleteById(g_plan_session_id)) {
+                ESP_LOGI("TRAIN", "Plan session %d marked complete", g_plan_session_id);
+            } else {
+                ESP_LOGW("TRAIN", "Mark complete failed for session %d", g_plan_session_id);
+            }
+        } else {
+            ESP_LOGW("TRAIN", "Skip mark-complete: no valid sessionId cached");
+        }
+        g_plan_session_id = -1; // 清除缓存
 }
+
 
 
 static void StartNextItem() {
@@ -222,6 +246,7 @@ static void StartNextItem() {
 }
 
 static void StartPlan() {
+    std::lock_guard<std::mutex> lk(g_record_mtx);
     g_record_items.clear();
     for (int i = 0; i < g_plan_sz; ++i) {
         g_record_items.push_back({g_plan[i].type, 0, i + 1, g_plan[i].weight, {}});
@@ -238,8 +263,9 @@ static void RestTimerCallback(void* arg) {
 }
 
 static void EnterRest() {
-     if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
-        g_record_items[g_cur_idx].num = rep_cnt;  // 保存实际个数
+    std::lock_guard<std::mutex> lk(g_record_mtx);
+    if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
+        g_record_items[g_cur_idx].num = rep_cnt;  // 再次同步次数
     }
     if (g_cur_idx >= g_plan_sz - 1) {
         FinishTraining();
@@ -789,9 +815,10 @@ void Application::imu_task(void* arg)
                     send_rep_json(rp2client);
 
                     // —— 每完成一次动作就把分数和次数写入当前记录 —— 
+                    std::lock_guard<std::mutex> lk(g_record_mtx);
                     if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
                         g_record_items[g_cur_idx].scores.push_back(score);
-                        g_record_items[g_cur_idx].num = rep_cnt;  // 同步累计次数，避免只在 EnterRest 里赋值
+                        g_record_items[g_cur_idx].num = rep_cnt;
                     }
 
 
@@ -1187,6 +1214,23 @@ void Application::handleStartTrainingJson(char* json)
             return;
 
         }
+    }
+
+
+
+    /* ---------- 解析计划 sessionId ---------- */
+
+    const cJSON* sid = cJSON_GetObjectItemCaseSensitive(root, "sessionId");
+    if (!cJSON_IsNumber(sid)) sid = cJSON_GetObjectItemCaseSensitive(root, "sid");
+    if (!cJSON_IsNumber(sid)) sid = cJSON_GetObjectItemCaseSensitive(root, "planSessionId");
+    if (!cJSON_IsNumber(sid)) sid = cJSON_GetObjectItemCaseSensitive(root, "id");
+
+    if (cJSON_IsNumber(sid) && sid->valuedouble > 0) {
+        g_plan_session_id = (int)sid->valuedouble;
+        ESP_LOGI(TAG, "Plan sessionId cached: %d", g_plan_session_id);
+    } else {
+        g_plan_session_id = -1;
+        ESP_LOGW(TAG, "No valid sessionId in start_training payload");
     }
 
 

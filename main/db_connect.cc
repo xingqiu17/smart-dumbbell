@@ -262,3 +262,36 @@ bool createRecordOfDay(int userId, const std::string& date,
 }
 
 
+// —— 训练计划：标记计划完成 ——
+// PATCH /api/plan/session/{sessionId}/complete  body: {"complete": true/false}
+bool patchPlanComplete(int sessionId, bool complete, std::string& out_json) {
+    char url[256];
+    snprintf(url, sizeof(url),
+             "http://154.9.24.233:8080/api/plan/session/%d/complete",
+             sessionId);
+
+    // 组装 JSON：{"complete": true/false}
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "complete", complete ? 1 : 0);
+    char* raw = cJSON_PrintUnformatted(root);
+    std::string payload = raw ? raw : "{}";
+    if (raw) cJSON_free(raw);
+    cJSON_Delete(root);
+
+    // 发送 PATCH（若你所用的 ESP-IDF 不支持 PATCH，可参考后面的“兼容写法”）
+    std::string body;
+    esp_err_t err = http_request(HTTP_METHOD_PATCH, url, &payload, body, "application/json");
+    if (err != ESP_OK) {
+        ESP_LOGE("UserClient", "patchPlanComplete failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    // 204 No Content 情况下 body 为空，属于正常
+    out_json.swap(body);
+    ESP_LOGI("UserClient", "patchPlanComplete OK (sessionId=%d, complete=%d)",
+             sessionId, (int)complete);
+    return true;
+}
+
+
+

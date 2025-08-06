@@ -185,3 +185,16 @@ bool RemoteDataService::CreateDayRecord(int userId, const std::string& date,
     ESP_LOGI(TAG_RDS, "CreateDayRecord ok");
     return true;
 }
+
+
+bool RemoteDataService::MarkPlanCompleteById(int sessionId)
+{
+    std::string resp;
+    bool ok = patchPlanComplete(sessionId, /*complete=*/true, resp);
+    if (!ok) {
+        ESP_LOGE(TAG_RDS, "MarkPlanCompleteById failed (sessionId=%d)", sessionId);
+        return false;
+    }
+    ESP_LOGI(TAG_RDS, "MarkPlanCompleteById OK (sessionId=%d)", sessionId);
+    return true;
+}

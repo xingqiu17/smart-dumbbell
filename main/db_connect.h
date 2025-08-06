@@ -94,5 +94,7 @@ bool createRecordOfDay(int userId, const std::string& date,
 
 bool getUserInfo(int userId, User& out_user);
 
+bool patchPlanComplete(int sessionId, bool complete, std::string& out_json);
+
 
 #endif // DB_CONNECT_H
