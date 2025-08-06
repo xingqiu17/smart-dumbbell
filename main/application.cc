@@ -745,6 +745,11 @@ void Application::imu_task(void* arg)
                     /* 你愿意的话再映射到 0–100 或做平滑 */
                     score = std::clamp(score, 0.f, 100.f);
 
+                    if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
+                        g_record_items[g_cur_idx].scores.push_back(score);
+                        g_record_items[g_cur_idx].num = rep_cnt;
+                    }
+
                     if (rep_cnt == rep_report.rep_idx) {
                         is_rep_counting = false;
                         g_item_running = false;
@@ -814,12 +819,8 @@ void Application::imu_task(void* arg)
                     rp2client.score    = score;
                     send_rep_json(rp2client);
 
-                    // —— 每完成一次动作就把分数和次数写入当前记录 —— 
-                    std::lock_guard<std::mutex> lk(g_record_mtx);
-                    if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
-                        g_record_items[g_cur_idx].scores.push_back(score);
-                        g_record_items[g_cur_idx].num = rep_cnt;
-                    }
+
+                    
 
 
                     /* 保存最近 N 次得分做滑动平均 */
