@@ -102,6 +102,7 @@ public:
     // 删除拷贝构造函数和赋值运算符
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
+    struct TrainingItem { int type; int reps; float weight; };
 
 
     static Application& GetInstance();
@@ -143,9 +144,11 @@ public:
     void handleStartTrainingJson(char* json);
 
     static void score_poll_task(void*);
-    /* ────────────────────────── 新增 End ────────────────────────── */
+
     /** 跳过当前休息，进入下一组 */
     void SkipRest();
+
+    bool StartTrainingFromItems(int sessionId, const std::vector<TrainingItem>& items);
 
     /** 退出整个训练流程 */
     void ExitTraining();

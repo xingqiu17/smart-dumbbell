@@ -21,6 +21,7 @@
 #include <ctime>
 #include "esp_timer.h"
 #include "db_connect.h"
+#include <vector>
 
 #define TAG "MCP"
 
@@ -28,7 +29,7 @@
 
 
 
-
+using AppTrainingItem = Application::TrainingItem;
 
 
 McpServer::McpServer() {
@@ -301,9 +302,13 @@ void McpServer::AddCommonTools() {
 
     // 查询某日的所有计划（只读，不创建）
     AddTool("self.plan.get_day",
-        "Get all plans for the given date of the current user. "
-        "Args: date (YYYY-MM-DD or 'today'). "
-        "Return: JSON array. Use this ONLY for reading, never for creating.",
+            "Get all plans for the given date of the current user. "
+            "Args: date (YYYY-MM-DD or 'today'). "
+            "Return: JSON array of plan sessions. "
+            "Each session object has a 'complete' flag: "
+            "`true` means that entire plan session is finished, "
+            "`false` means it is still in progress. "
+            "Ignore the `complete` fields inside 'items'.",
         PropertyList({
             Property("date", kPropertyTypeString)
         }),
@@ -427,7 +432,10 @@ void McpServer::AddCommonTools() {
                 ESP_LOGI(TAG, "create_day: default tWeight before parse = %.3f, this=%p",
                         (double)this->current_user_tweight_, this);
 
-                const cJSON* jw = cJSON_GetObjectItemCaseSensitive(it, "tWeight");
+                 // 兼容多种命名：tWeight / tweight / weight
+                cJSON* jw = cJSON_GetObjectItemCaseSensitive(it, "tWeight");
+                if (!jw) jw = cJSON_GetObjectItemCaseSensitive(it, "tweight");
+                if (!jw) jw = cJSON_GetObjectItemCaseSensitive(it, "weight");
                 if (jw) {
                     if (cJSON_IsNumber(jw)) {
                         tWeight = static_cast<float>(jw->valuedouble);
@@ -480,8 +488,138 @@ void McpServer::AddCommonTools() {
             return resp;
         });
 
+            // ============================================================
+        // 1) 按计划开始训练：通过 sessionId 拉取当天计划并启动训练
+        // ============================================================
+        AddTool("self.training.start_by_plan",
+            "Start a training session by a specific plan sessionId. "
+            "Args: sessionId(int, required), date(YYYY-MM-DD or 'today', optional).",
+            PropertyList({
+                Property("sessionId", kPropertyTypeInteger),
+                Property("date",      kPropertyTypeString, std::string("today"))
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                int uid = this->current_user_id_;
+                if (uid <= 0) return R"({"success":false,"message":"no_user"})";
 
+                const int sid = props["sessionId"].value<int>();
+                std::string date = props["date"].value<std::string>();
 
+                // 标准化日期
+                auto normalizeDate = [](std::string& d) {
+                    if (d.empty() || d == "today" || d == "Today" || d == "TODAY") {
+                        time_t now = time(nullptr);
+                        struct tm tm_info;
+                        localtime_r(&now, &tm_info);
+                        char buf[11] = {0}; // "YYYY-MM-DD"
+                        strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_info);
+                        d.assign(buf);
+                    }
+                };
+                normalizeDate(date);
+
+                // 拉取当天所有计划
+                std::string plans_json;
+                if (!RemoteDataService::GetInstance().GetDayPlans(uid, date, plans_json)) {
+                    return R"({"success":false,"message":"fetch_plans_failed"})";
+                }
+
+                // 在数组中找到目标 session
+                cJSON* root = cJSON_Parse(plans_json.c_str());
+                if (!root || !cJSON_IsArray(root)) {
+                    if (root) cJSON_Delete(root);
+                    return R"({"success":false,"message":"plans_not_array"})";
+                }
+                cJSON* found = nullptr;
+                int n = cJSON_GetArraySize(root);
+                for (int i = 0; i < n; ++i) {
+                    cJSON* elem = cJSON_GetArrayItem(root, i);
+                    if (!cJSON_IsObject(elem)) continue;
+                    cJSON* session = cJSON_GetObjectItemCaseSensitive(elem, "session");
+                    if (!session || !cJSON_IsObject(session)) continue;
+                    cJSON* jsid = cJSON_GetObjectItemCaseSensitive(session, "sessionId");
+                    if (!jsid || !cJSON_IsNumber(jsid)) continue;
+                    if (jsid->valueint == sid) { found = elem; break; }
+                }
+                if (!found) {
+                    cJSON_Delete(root);
+                    return R"({"success":false,"message":"plan_not_found"})";
+                }
+
+                // 提取 items → 转 TrainingItem 向量
+                cJSON* items = cJSON_GetObjectItemCaseSensitive(found, "items");
+                if (!items || !cJSON_IsArray(items)) {
+                    cJSON_Delete(root);
+                    return R"({"success":false,"message":"items_not_array"})";
+                }
+
+                std::vector<AppTrainingItem> vec; // {type, reps, weight}
+                int m = cJSON_GetArraySize(items);
+                vec.reserve(m);
+                for (int i = 0; i < m; ++i) {
+                    cJSON* it = cJSON_GetArrayItem(items, i);
+                    if (!cJSON_IsObject(it)) continue;
+                    cJSON* jt = cJSON_GetObjectItemCaseSensitive(it, "type");
+                    cJSON* jn = cJSON_GetObjectItemCaseSensitive(it, "number");
+                    cJSON* jw = cJSON_GetObjectItemCaseSensitive(it, "tWeight");
+                    if (!jt || !jn || !cJSON_IsNumber(jt) || !cJSON_IsNumber(jn)) continue;
+
+                    float tWeight = this->current_user_tweight_;
+                    if (cJSON_IsNumber(jw)) tWeight = (float)jw->valuedouble;
+                    else if (cJSON_IsString(jw) && jw->valuestring) {
+                        try { tWeight = std::stof(jw->valuestring); } catch (...) { tWeight = 0.f; }
+                    }
+                    if (!(tWeight > 0.f)) continue;
+
+                    AppTrainingItem ti{};
+                    ti.type   = jt->valueint;
+                    ti.reps   = jn->valueint;
+                    ti.weight = tWeight;
+                    vec.push_back(ti);
+                }
+                cJSON_Delete(root);
+
+                if (vec.empty()) {
+                    return R"({"success":false,"message":"no_valid_items"})";
+                }
+
+                // 切到应用线程启动训练
+                Application::GetInstance().Schedule([sid, v = std::move(vec)]() {
+                    Application::GetInstance().StartTrainingFromItems(sid, v);
+                });
+
+                return R"({"success":true})";
+            });
+
+        // ============================================================
+        // 2) 跳过休息：直接开始下一组
+        // ============================================================
+        AddTool("self.training.skip_rest",
+            "Skip the current rest and start the next set immediately."
+            "Use this tool when the user wants to skip the rest period and continue with the next set.",
+            PropertyList(),   // 无参
+            [this](const PropertyList&) -> ReturnValue {
+                Application::GetInstance().Schedule([]() {
+                    Application::GetInstance().SkipRest();
+                });
+                return R"({"success":true})";
+            });
+
+        // ============================================================
+        // 3) 退出训练：直接结束本次训练
+        // ============================================================
+        AddTool("self.training.exit",
+            "Exit current training immediately (finalize and save)."
+            "Use this tool when the user wants to stop the current training session and exit.",
+            PropertyList(),   // 无参
+            [this](const PropertyList&) -> ReturnValue {
+                Application::GetInstance().Schedule([]() {
+                    Application::GetInstance().ExitTraining();
+                });
+                return R"({"success":true})";
+            });
+
+    
 
 
 

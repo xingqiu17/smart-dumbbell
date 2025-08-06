@@ -82,6 +82,7 @@ public:
 
     // 直接按 sessionId 将计划标记为完成
     bool MarkPlanCompleteById(int sessionId);
+    
 
 private:
     RemoteDataService() = default;

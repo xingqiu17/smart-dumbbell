@@ -37,6 +37,8 @@ extern "C" {
 #include "FusionMath.h"
 }
 
+using TrainingItem = Application::TrainingItem;
+
 enum Axis {
     AXIS_X = 0,
     AXIS_Y = 1,
@@ -94,7 +96,7 @@ float rms_omega_y = 0.0f; // 用于计算平滑度的 Y 轴角速度 RMSb
 RepReport rep_report = { EX_UNKNOWN, 0, 0.0f }; // 当前动作计数报告
 
 
-struct TrainingItem { int type; int reps; float weight; };
+
 static constexpr int MAX_ITEMS = 32;
 
 static TrainingItem g_plan[MAX_ITEMS];
@@ -256,6 +258,37 @@ static void StartPlan() {
     g_need_next = false;
     StartNextItem();
 }
+
+
+bool Application::StartTrainingFromItems(int sessionId, const std::vector<TrainingItem>& items) {
+    // 1) 若正在休息，先停表
+    if (g_in_rest && rest_timer_handle) {
+        esp_timer_stop(rest_timer_handle);
+        g_in_rest = false;
+    }
+
+    // 2) 基本校验
+    if (items.empty() || items.size() > (size_t)MAX_ITEMS) {
+        ESP_LOGE("TRAIN", "StartTrainingFromItems: bad items size=%d", (int)items.size());
+        return false;
+    }
+
+    // 3) 写入计划、缓存 sessionId
+    {
+        std::lock_guard<std::mutex> lk(g_record_mtx);
+        g_plan_sz = (int)items.size();
+        for (int i = 0; i < g_plan_sz; ++i) {
+            g_plan[i] = items[i]; // TrainingItem {type, reps, weight}
+        }
+        g_plan_session_id = sessionId;
+    }
+
+    // 4) 启动训练
+    StartPlan();  // static 本地可见，OK
+    ESP_LOGI("TRAIN", "StartTrainingFromItems: sid=%d sets=%d", sessionId, g_plan_sz);
+    return true;
+}
+
 
 static void RestTimerCallback(void* arg) {
     g_in_rest = false;
