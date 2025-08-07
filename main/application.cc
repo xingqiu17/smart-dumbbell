@@ -117,7 +117,7 @@ static volatile bool g_need_next    = false;   // 某组完成后置位，驱动
 
 static volatile bool g_in_rest      = false;   // 休息模式
 static esp_timer_handle_t rest_timer_handle = nullptr;
-static constexpr uint64_t REST_DURATION_US = 10 * 1000000ULL; // 5s
+
 //new
 
 #define WAKE_WORD_APPLY 0 //唤醒词是否启用    0 不启用    1 启用
@@ -152,6 +152,12 @@ static constexpr size_t IMU_BUF_LEN = 128;     // 100 Hz 采样 ≈1.28 s
 static ImuFrame imuBuf[IMU_BUF_LEN];
 static size_t   wrIdx   = 0;                   // 写指针
 
+
+
+static int GetRestSeconds(int idx) {
+    if (idx < 0 || idx >= g_plan_sz) return 0;
+    return g_plan[idx].rest;
+}
 
 static std::string CurrentDateISO() {
     time_t now = time(nullptr);
@@ -307,22 +313,34 @@ static void RestTimerCallback(void* arg) {
 static void EnterRest() {
     std::lock_guard<std::mutex> lk(g_record_mtx);
     if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
-        g_record_items[g_cur_idx].num = rep_cnt;  // 再次同步次数
+        g_record_items[g_cur_idx].num = rep_cnt; // 同步次数
     }
+
+    /* 最后一组做完就直接结束，不休息 */
     if (g_cur_idx >= g_plan_sz - 1) {
         FinishTraining();
         return;
     }
+
+    /* === 根据 plan 中的 rest 秒数启动定时 === */
+    int rest_sec = GetRestSeconds(g_cur_idx);
+    if (rest_sec <= 0) {          // 0 表示跳过休息
+        StartNextItem();
+        return;
+    }
+
     g_in_rest = true;
+
     /* ---- 切到 Pause 页 ---- */
     auto display = Board::GetInstance().GetDisplay();
-    int rest_sec = REST_DURATION_US / 1000000ULL;          // μs→s
-    display->UpdatePause(rep_report.ex,                    // 当前动作 id
-                         rep_report.rep_idx,               // 目标次数
-                         rest_sec);                        // 倒计时
+    display->UpdatePause(
+        rep_report.ex,            // 当前动作 id
+        rep_report.rep_idx,       // 目标次数
+        rest_sec                  // 倒计时秒
+    );
 
-
-
+    /* ---- 启动一枪定时器 ---- */
+    uint64_t rest_us = (uint64_t)rest_sec * 1'000'000ULL;
     if (!rest_timer_handle) {
         esp_timer_create_args_t args = {
             .callback = &RestTimerCallback,
@@ -334,9 +352,11 @@ static void EnterRest() {
         esp_timer_create(&args, &rest_timer_handle);
     }
     esp_timer_stop(rest_timer_handle);
-    esp_timer_start_once(rest_timer_handle, REST_DURATION_US);
-    ESP_LOGI("TRAIN", "Resting for %.1f seconds", REST_DURATION_US / 1e6);
+    esp_timer_start_once(rest_timer_handle, rest_us);
+
+    ESP_LOGI("TRAIN", "Resting for %d seconds", rest_sec);
 }
+
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
@@ -1308,6 +1328,7 @@ void Application::handleStartTrainingJson(char* json)
             cJSON* jt = cJSON_GetObjectItem(it, "type");
             cJSON* jr = cJSON_GetObjectItem(it, "reps");
             cJSON* jw = cJSON_GetObjectItem(it, "weight");
+            cJSON* jrest = cJSON_GetObjectItem(it, "rest");
             if (!jt || !jr || !jw || !cJSON_IsNumber(jt) || !cJSON_IsNumber(jr) || !cJSON_IsNumber(jw)) {
                 ESP_LOGW(TAG, "item[%d] missing fields or not number", i);
                 continue;
@@ -1315,12 +1336,14 @@ void Application::handleStartTrainingJson(char* json)
             int   type   = jt->valueint;
             int   reps   = jr->valueint;
             float weight = (float)cJSON_GetNumberValue(jw);
+            int   rest   = (jrest && cJSON_IsNumber(jrest)) ? jrest->valueint : 0;
 
             if (reps <= 0 || reps > 200)     { ESP_LOGW(TAG, "bad reps=%d", reps); continue; }
             if (weight <= 0 || weight > 200) { ESP_LOGW(TAG, "bad weight=%.2f", weight); continue; }
+            if (rest < 0  || rest > 600)     { ESP_LOGW(TAG, "bad rest=%d", rest);  rest = 0; }
 
-            g_plan[g_plan_sz++] = { type, reps, weight };
-            ESP_LOGI(TAG, "[%d] type=%d reps=%d weight=%.2f", i, type, reps, weight);
+            g_plan[g_plan_sz++] = { type, reps, weight, rest };
+            ESP_LOGI(TAG, "[%d] type=%d reps=%d weight=%.2f rest=%d", i, type, reps, weight, rest);
         }
     }
 

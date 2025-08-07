@@ -103,7 +103,7 @@ public:
     // 删除拷贝构造函数和赋值运算符
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
-    struct TrainingItem { int type; int reps; float weight; };
+    struct TrainingItem { int type; int reps; float weight; int rest; };
 
 
     static Application& GetInstance();

@@ -344,8 +344,9 @@ void McpServer::AddCommonTools() {
     AddTool("self.plan.create_day",
         "Create a plan for the given date of the current user. "
         "Args: date (YYYY-MM-DD or 'today'), items (JSON array string). "
-        "Each item MUST contain: type(int), number(int), tOrder(int). "
+        "Each item MUST contain: type(int), number(int), tOrder(int), rest(int). "
         "tWeight(float) is OPTIONAL — include it ONLY if the user explicitly specifies a weight; "
+        "`rest` is the pause time *after* this action, in **seconds** (0 means skip rest). "
         "About type: 1=dumbbell-curl."
         "IMPORTANT: type must be an integer ID (do NOT send strings).",
         PropertyList({
@@ -454,6 +455,18 @@ void McpServer::AddCommonTools() {
                     }
                 }
 
+                /* ---- rest ---- */
+                int rest = 0;                                           // 默认 0
+                if (cJSON* jr = cJSON_GetObjectItemCaseSensitive(it, "rest")) {
+                    if (cJSON_IsNumber(jr)) rest = jr->valueint;
+                }
+                if (rest < 0 || rest > 600) {      // 最大 10 分钟，可按需放宽
+                    cJSON_Delete(norm_items); cJSON_Delete(arr);
+                    return std::string("{\"success\":false,\"message\":\"bad_rest_at_index_")
+                        + std::to_string(i + 1) + "\"}";
+                }
+
+
 
                 // 最终校验：若默认也无效（<=0），才报错
                 if (!(tWeight > 0.0f) || !std::isfinite(tWeight)) {
@@ -469,6 +482,7 @@ void McpServer::AddCommonTools() {
                 cJSON_AddNumberToObject(out, "number",  number);
                 cJSON_AddNumberToObject(out, "tOrder",  tOrder);
                 cJSON_AddNumberToObject(out, "tWeight", tWeight); // 以 number 发送
+                cJSON_AddNumberToObject(out, "rest", rest);
                 cJSON_AddItemToArray(norm_items, out);
             }
             cJSON_Delete(arr);
@@ -488,7 +502,7 @@ void McpServer::AddCommonTools() {
             return resp;
         });
 
-            // ============================================================
+        // ============================================================
         // 1) 按计划开始训练：通过 sessionId 拉取当天计划并启动训练
         // ============================================================
         AddTool("self.training.start_by_plan",
@@ -562,6 +576,7 @@ void McpServer::AddCommonTools() {
                     cJSON* jt = cJSON_GetObjectItemCaseSensitive(it, "type");
                     cJSON* jn = cJSON_GetObjectItemCaseSensitive(it, "number");
                     cJSON* jw = cJSON_GetObjectItemCaseSensitive(it, "tWeight");
+                    cJSON* jr    = cJSON_GetObjectItemCaseSensitive(it, "rest");
                     if (!jt || !jn || !cJSON_IsNumber(jt) || !cJSON_IsNumber(jn)) continue;
 
                     float tWeight = this->current_user_tweight_;
@@ -571,10 +586,15 @@ void McpServer::AddCommonTools() {
                     }
                     if (!(tWeight > 0.f)) continue;
 
+                    /* ---- 解析休息秒 ---- */
+                    int rest = (jr && cJSON_IsNumber(jr)) ? jr->valueint : 0;
+                    if (rest < 0) rest = 0;
+
                     AppTrainingItem ti{};
                     ti.type   = jt->valueint;
                     ti.reps   = jn->valueint;
                     ti.weight = tWeight;
+                    ti.rest   = rest;
                     vec.push_back(ti);
                 }
                 cJSON_Delete(root);
