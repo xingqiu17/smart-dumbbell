@@ -27,6 +27,7 @@
 #pragma once
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "lcd_display.h"
 
 #define SCHEDULE_EVENT (1 << 0)
 #define SEND_AUDIO_EVENT (1 << 1)

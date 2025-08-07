@@ -1121,6 +1121,10 @@ lv_obj_t* LcdDisplay::CreatePage(const std::string& id) {
     lv_obj_t* page = lv_obj_create(lv_screen_active());
     lv_obj_set_size(page, LV_HOR_RES, LV_VER_RES);
     lv_obj_add_flag(page, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_bg_color(page, current_theme_.chat_background, 0);
+    lv_obj_set_style_text_color(page, current_theme_.text, 0);
+    lv_obj_set_style_border_width(page, 0, 0);
+    lv_obj_set_style_pad_all(page, 0, 0);
     pages_[id] = page;
     return page;
 }
@@ -1161,4 +1165,84 @@ void LcdDisplay::UpdateExercise(const std::string& name, int count, float score)
     char score_buf[16];
     snprintf(score_buf, sizeof(score_buf), "%.1f", score);
     lv_label_set_text(workout_score_label_, score_buf);
+
 }
+
+void LcdDisplay::UpdatePause(int action_id, int target_reps, int seconds)
+{
+    DisplayLockGuard lock(this);
+
+    /* 1. 懒加载：第一次才真正创建页面与控件 */
+    if (!pause_page_) {
+        pause_page_ = CreatePage("pause");              // ★ 页面名
+        if (!pause_page_) return;
+
+        /* 页面采用列布局，全部居中 */
+        lv_obj_set_flex_flow(pause_page_, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(
+            pause_page_, LV_FLEX_ALIGN_CENTER,
+            LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_all(pause_page_, 0, 0);
+        lv_obj_set_style_border_width(pause_page_, 0, 0);
+
+        /*动作名*/
+        pause_action_lbl_ = lv_label_create(pause_page_);
+        lv_obj_set_style_text_font(pause_action_lbl_, fonts_.text_font, 0);
+
+        /*目标次数 */
+        pause_reps_lbl_ = lv_label_create(pause_page_);
+        lv_obj_set_style_text_font(pause_reps_lbl_, fonts_.text_font, 0);
+
+        /*倒计时*/
+        pause_timer_lbl_ = lv_label_create(pause_page_);
+        lv_obj_set_style_text_font(pause_timer_lbl_, &lv_font_montserrat_48, 0);
+    }
+
+    /* 2. 切页到 pause */
+    ShowPage("pause");
+
+    /* 3. 刷新文本 */
+    // lv_label_set_text(pause_action_lbl_, action_id);
+    lv_label_set_text(pause_action_lbl_, ActionName(action_id));
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "目标数量：%d", target_reps);
+    lv_label_set_text(pause_reps_lbl_, buf);
+
+    pause_remaining_secs_ = seconds;
+    lv_label_set_text_fmt(pause_timer_lbl_, "%d", pause_remaining_secs_);
+
+    /* 4. （重新）启动 1 Hz 定时器 */
+    if (!pause_timer_handle_) {
+        esp_timer_create_args_t args = {
+            .callback = [](void* arg) {
+                auto* self = static_cast<LcdDisplay*>(arg);
+                if (--self->pause_remaining_secs_ <= 0) {
+                    self->StopPause();                 // 只停表，实际流转交给 Application
+                    return;
+                }
+                DisplayLockGuard lock(self);
+                lv_label_set_text_fmt(self->pause_timer_lbl_, "%d",
+                                       self->pause_remaining_secs_);
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "pause_timer",
+            .skip_unhandled_events = true
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&args, &pause_timer_handle_));
+    } else {
+        esp_timer_stop(pause_timer_handle_);
+    }
+    ESP_ERROR_CHECK(esp_timer_start_periodic(pause_timer_handle_, 1'000'000)); // 1 s
+}
+
+/* -------------  提前终止接口*/
+void LcdDisplay::StopPause()
+{
+    if (pause_timer_handle_) {
+        esp_timer_stop(pause_timer_handle_);
+    }
+}
+
+

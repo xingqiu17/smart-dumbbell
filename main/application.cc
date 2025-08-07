@@ -117,7 +117,7 @@ static volatile bool g_need_next    = false;   // 某组完成后置位，驱动
 
 static volatile bool g_in_rest      = false;   // 休息模式
 static esp_timer_handle_t rest_timer_handle = nullptr;
-static constexpr uint64_t REST_DURATION_US = 5 * 1000000ULL; // 5s
+static constexpr uint64_t REST_DURATION_US = 10 * 1000000ULL; // 5s
 //new
 
 #define WAKE_WORD_APPLY 0 //唤醒词是否启用    0 不启用    1 启用
@@ -219,6 +219,9 @@ static void FinishTraining() {
             ESP_LOGW("TRAIN", "Skip mark-complete: no valid sessionId cached");
         }
         g_plan_session_id = -1; // 清除缓存
+
+    auto display = Board::GetInstance().GetDisplay();
+    display->ShowPage("main");
 }
 
 
@@ -242,6 +245,12 @@ static void StartNextItem() {
     // 清零你在 imu_task 内部用到的统计变量（若有文件内静态，可在此处重置）
 
     g_item_running = true;
+
+    /* ---- 在这里刷新训练页 ---- */
+    auto  display = Board::GetInstance().GetDisplay();
+    const char* zh = ActionName(rep_report.ex);          // 你的中文映射
+    display->UpdateExercise(zh, 0 /*已完成次数*/, 0.0f);
+    display->ShowPage("workout");
 
     ESP_LOGI("TRAIN", "Start item #%d/%d: type=%d reps=%d weight=%.2f",
              g_cur_idx+1, g_plan_sz, it.type, it.reps, it.weight);
@@ -305,6 +314,15 @@ static void EnterRest() {
         return;
     }
     g_in_rest = true;
+    /* ---- 切到 Pause 页 ---- */
+    auto display = Board::GetInstance().GetDisplay();
+    int rest_sec = REST_DURATION_US / 1000000ULL;          // μs→s
+    display->UpdatePause(rep_report.ex,                    // 当前动作 id
+                         rep_report.rep_idx,               // 目标次数
+                         rest_sec);                        // 倒计时
+
+
+
     if (!rest_timer_handle) {
         esp_timer_create_args_t args = {
             .callback = &RestTimerCallback,
@@ -748,6 +766,16 @@ void Application::imu_task(void* arg)
                     float dR = rMax - rMin;
                     rep_cnt++; // 计数
                     
+
+                auto display = Board::GetInstance().GetDisplay();
+                display->UpdateExercise(ActionName(rep_report.ex),   // 中文名
+                                        rep_cnt,                     // 当前完成数
+                                        0.9);                      // 即时分数
+
+
+
+
+
                     uint64_t rep_us   = now_us - cycle_start_us;   // 本次用时
 
                                 /* ================= 生成 7 维特征 ================= */
@@ -1875,8 +1903,6 @@ void Application::Start() {
     // Print heap stats
     SystemInfo::PrintHeapStats();
     
-
-
     // Enter the main event loop
     MainEventLoop();
 }

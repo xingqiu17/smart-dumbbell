@@ -261,3 +261,6 @@ void Display::ShowPage(const std::string& id) {
 void Display::UpdateExercise(const std::string& name, int count, float score) {
     // Base display does not show exercise info
 }
+
+void Display::UpdatePause(int action_id, int target_reps, int seconds){}    // ← 新接口
+void Display::StopPause(){}                                               // 可选：提前终止

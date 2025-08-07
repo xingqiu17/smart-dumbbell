@@ -10,6 +10,25 @@
 #include <atomic>
 #include <unordered_map>
 
+static const char* kActionNameZh[] = {
+/* EX_UNKNOWN */ "未知动作",
+/* EX_AIDBC   */ "上斜交替哑铃弯举",
+/* ……         */ /* 你可以继续补全 */
+/* EX_DWC     */ "哑铃弯举",
+/* EX_DLR     */ "哑铃划船",
+/* EX_DSP     */ "哑铃深蹲推举",
+/* EX_45DBP   */ "45°哑铃卧推",
+/* EX_IDBC    */ "反握哑铃弯举",
+};
+
+/* 小工具函数：越界时返回“未知动作” */
+static inline const char* ActionName(int id)
+{
+    if (id < 0 || id >= (int)(sizeof(kActionNameZh)/sizeof(kActionNameZh[0])))
+        return kActionNameZh[0];
+    return kActionNameZh[id];
+}
+
 // Theme color structure
 struct ThemeColors {
     lv_color_t background;
@@ -33,6 +52,8 @@ protected:
     lv_obj_t* status_bar_ = nullptr;
     lv_obj_t* content_ = nullptr;
     lv_obj_t* container_ = nullptr;
+
+    //newf
     std::unordered_map<std::string, lv_obj_t*> pages_;
     lv_obj_t* current_page_ = nullptr;
     lv_obj_t* side_bar_ = nullptr;
@@ -41,6 +62,17 @@ protected:
     lv_obj_t* workout_name_label_ = nullptr;
     lv_obj_t* workout_count_label_ = nullptr;
     lv_obj_t* workout_score_label_ = nullptr;
+
+        /* -------- pause 页面及子控件（预声明） -------- */
+    lv_obj_t* pause_page_        = nullptr;   // 整个页面
+    lv_obj_t* pause_action_lbl_  = nullptr;   // 动作名称（小字）
+    lv_obj_t* pause_reps_lbl_    = nullptr;   // 目标次数（小字）
+    lv_obj_t* pause_timer_lbl_   = nullptr;   // 倒计时（大字）
+
+    esp_timer_handle_t pause_timer_handle_ = nullptr;
+    int  pause_remaining_secs_ = 0;
+
+
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;
@@ -68,6 +100,9 @@ public:
     virtual lv_obj_t* CreatePage(const std::string& id) override;
     virtual void ShowPage(const std::string& id) override;
     virtual void UpdateExercise(const std::string& name, int count, float score) override;
+    virtual void UpdatePause(int action_id, int target_reps, int seconds)override;   // ← 新接口
+    virtual void StopPause()override;                                               // 可选：提前终止
+    
 };
 
 // RGB LCD显示器
@@ -114,4 +149,5 @@ public:
                       bool mirror_x, bool mirror_y, bool swap_xy,
                       DisplayFonts fonts);
 };
+
 #endif // LCD_DISPLAY_H
