@@ -4,8 +4,11 @@
 #include <string>
 #include <algorithm>
 #include "application.h"
+#include "mcp_server.h"
+#include "remote_data_service.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include <cstdio>
 
 static const char *TAG = "WS_SRV";
 static httpd_handle_t server = NULL;
@@ -60,6 +63,22 @@ static esp_err_t ws_handler(httpd_req_t *req)
             // 自动重连：token 验证通过
             ESP_LOGI(TAG, "Token matched — connected");
             sendToClient(R"({"event":"connected"})");
+            // === 新增：尝试恢复上次绑定的用户（从 NVS 读）===
+            int uid = kv.GetInt("user_id", 0);
+            if (uid > 0) {
+                // 写回运行时（与 setUser 行为保持一致）
+                RemoteDataService::GetInstance().SetCurrentUserId(uid);
+                McpServer::GetInstance().SetCurrentUserId(uid);
+
+                // 主动通知 App：已自动绑定上次用户
+                char buf[128];
+                snprintf(buf, sizeof(buf),
+                         R"({"event":"user_bound","userId":%d})", uid);
+                sendToClient(buf);
+                ESP_LOGI(TAG, "Auto-bound last user: uid=%d", uid);
+            } else {
+                ESP_LOGI(TAG, "No saved user_id to auto-bind");
+            }
         } else {
             // 无 token 或 验证失败，都回到配对流程
             ESP_LOGI(TAG, "Trigger manual pairing (saved='%s', incoming='%s')",

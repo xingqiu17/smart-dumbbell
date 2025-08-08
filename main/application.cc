@@ -1281,6 +1281,9 @@ void Application::handleStartTrainingJson(char* json)
 
                 sendToClient(R"({"success":true,"event":"user_bound"})");
                 McpServer::GetInstance().SetCurrentUserId(uid);
+                // === 新增：把 user_id 写入 NVS（pairing 命名空间）===
+                auto& kv = Application::GetInstance().GetPairingSettings();
+                kv.SetInt("user_id", uid);
             }
             cJSON_Delete(root);
             return;
@@ -1523,6 +1526,19 @@ void Application::Start() {
     ESP_ERROR_CHECK(nvs_flash_init());
     // NVS 初始化后，再创建 Settings 实例
     pairing_settings_ = std::make_unique<Settings>("pairing", /*read_write=*/true);
+
+    // === 新增：开机即从 NVS 自动绑定上次用户（即使未连接 App 也生效）===
+    {
+        auto& kv = GetPairingSettings();
+        int uid = kv.GetInt("user_id", 0);
+        if (uid > 0) {
+            RemoteDataService::GetInstance().SetCurrentUserId(uid);
+            McpServer::GetInstance().SetCurrentUserId(uid);
+           ESP_LOGI(TAG, "Startup auto-bind: uid=%d from NVS", uid);
+        } else {
+            ESP_LOGI(TAG, "Startup auto-bind: no saved user_id");
+        }
+    }
 
      // ─── 在这里新增：创建 JSON 队列 & 启动处理任务 ───
     s_jsonQueue = xQueueCreate(5, sizeof(char*));
