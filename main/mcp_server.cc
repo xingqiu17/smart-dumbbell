@@ -21,6 +21,7 @@
 #include <ctime>
 #include "esp_timer.h"
 #include "db_connect.h"
+#include "websocket_srv.h"
 #include <vector>
 
 #define TAG "MCP"
@@ -302,6 +303,7 @@ void McpServer::AddCommonTools() {
 
     // 查询某日的所有计划（只读，不创建）
     AddTool("self.plan.get_day",
+            "Only Use this tool to confirm the plan of the day,not start or create"
             "Get all plans for the given date of the current user. "
             "Args: date (YYYY-MM-DD or 'today'). "
             "Return: JSON array of plan sessions. "
@@ -502,11 +504,9 @@ void McpServer::AddCommonTools() {
             return resp;
         });
 
-        // ============================================================
-        // 1) 按计划开始训练：通过 sessionId 拉取当天计划并启动训练
-        // ============================================================
         AddTool("self.training.start_by_plan",
-            "Start a training session by a specific plan sessionId. "
+            "Start a training session by an existing uncompleted plan . "
+            "You can confirm the plan by sessionid."
             "Args: sessionId(int, required), date(YYYY-MM-DD or 'today', optional).",
             PropertyList({
                 Property("sessionId", kPropertyTypeInteger),
@@ -576,7 +576,7 @@ void McpServer::AddCommonTools() {
                     cJSON* jt = cJSON_GetObjectItemCaseSensitive(it, "type");
                     cJSON* jn = cJSON_GetObjectItemCaseSensitive(it, "number");
                     cJSON* jw = cJSON_GetObjectItemCaseSensitive(it, "tWeight");
-                    cJSON* jr    = cJSON_GetObjectItemCaseSensitive(it, "rest");
+                    cJSON* jr = cJSON_GetObjectItemCaseSensitive(it, "rest");
                     if (!jt || !jn || !cJSON_IsNumber(jt) || !cJSON_IsNumber(jn)) continue;
 
                     float tWeight = this->current_user_tweight_;
@@ -603,6 +603,24 @@ void McpServer::AddCommonTools() {
                     return R"({"success":false,"message":"no_valid_items"})";
                 }
 
+                // 发送数据到 app
+                cJSON* response = cJSON_CreateObject();
+                cJSON_AddStringToObject(response, "event", "training_started");
+                cJSON_AddNumberToObject(response, "sessionId", sid);
+                cJSON_AddStringToObject(response, "date", date.c_str());  // 使用 .c_str() 转换为 const char*
+                cJSON* items_arr = cJSON_CreateArray();
+                for (const auto& item : vec) {
+                    cJSON* item_obj = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(item_obj, "type", item.type);
+                    cJSON_AddNumberToObject(item_obj, "reps", item.reps);
+                    cJSON_AddNumberToObject(item_obj, "weight", item.weight);
+                    cJSON_AddNumberToObject(item_obj, "rest", item.rest);
+                    cJSON_AddItemToArray(items_arr, item_obj);
+                }
+                cJSON_AddItemToObject(response, "items", items_arr);
+                sendToClient(cJSON_PrintUnformatted(response));
+                cJSON_Delete(response);
+
                 // 切到应用线程启动训练
                 Application::GetInstance().Schedule([sid, v = std::move(vec)]() {
                     Application::GetInstance().StartTrainingFromItems(sid, v);
@@ -611,19 +629,29 @@ void McpServer::AddCommonTools() {
                 return R"({"success":true})";
             });
 
+
         // ============================================================
-        // 2) 跳过休息：直接开始下一组
+        // 2) 跳过休息：直接跳过当前休息，开始下一个动作
         // ============================================================
-        AddTool("self.training.skip_rest",
-            "Skip the current rest and start the next set immediately."
-            "Use this tool when the user wants to skip the rest period and continue with the next set.",
-            PropertyList(),   // 无参
-            [this](const PropertyList&) -> ReturnValue {
-                Application::GetInstance().Schedule([]() {
-                    Application::GetInstance().SkipRest();
-                });
-                return R"({"success":true})";
+
+       AddTool("self.training.skip_rest",
+        "Skip the current rest and start the next set immediately."
+        "Use this tool when the user wants to skip the rest period and continue with the next set.",
+        PropertyList(),   // 无参
+        [this](const PropertyList&) -> ReturnValue {
+            Application::GetInstance().Schedule([]() {
+                Application::GetInstance().SkipRest();
             });
+            
+            // 发送跳过休息的通知
+            cJSON* response = cJSON_CreateObject();
+            cJSON_AddStringToObject(response, "event", "rest_skipped");
+            sendToClient(cJSON_PrintUnformatted(response));
+            cJSON_Delete(response);
+
+            return R"({"success":true})";
+        });
+
 
         // ============================================================
         // 3) 退出训练：直接结束本次训练
@@ -636,6 +664,13 @@ void McpServer::AddCommonTools() {
                 Application::GetInstance().Schedule([]() {
                     Application::GetInstance().ExitTraining();
                 });
+
+                // 发送退出训练的通知
+                cJSON* response = cJSON_CreateObject();
+                cJSON_AddStringToObject(response, "event", "training_exited");
+                sendToClient(cJSON_PrintUnformatted(response));
+                cJSON_Delete(response);
+
                 return R"({"success":true})";
             });
 
