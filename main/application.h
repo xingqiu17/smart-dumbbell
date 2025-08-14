@@ -128,6 +128,12 @@ public:
     void PlaySound(const std::string_view& sound);
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    // 统一设态 + 三个便捷封装
+    void SendMcpStateSet(const char* mode);
+    void NotifyTrainingStarted();
+    void NotifyRestEntered();
+    void NotifyTrainingExited();
+
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }

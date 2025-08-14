@@ -29,6 +29,7 @@
 #include "websocket_srv.h" 
 #include "http_client.h"
 #include <mutex>
+#include <algorithm>  
 
 
 
@@ -154,6 +155,8 @@ static size_t   wrIdx   = 0;                   // 写指针
 
 
 
+
+
 static int GetRestSeconds(int idx) {
     if (idx < 0 || idx >= g_plan_sz) return 0;
     return g_plan[idx].rest;
@@ -173,6 +176,7 @@ static void FinishTraining() {
     if (g_cur_idx >= 0 && g_cur_idx < g_plan_sz && g_cur_idx < (int)g_record_items.size()) {
     g_record_items[g_cur_idx].num = rep_cnt;
     }
+    Application::GetInstance().NotifyTrainingExited();
     ESP_LOGI("TRAIN", "Plan finished: %d items done", g_plan_sz);
     cJSON* items = cJSON_CreateArray();
     for (const auto& it : g_record_items) {
@@ -238,6 +242,8 @@ static void StartNextItem() {
         FinishTraining();
         return;
     }
+
+    Application::GetInstance().NotifyTrainingStarted(); 
 
     const TrainingItem& it = g_plan[g_cur_idx];
     // 枚举值与你的 JSON type 对齐，直接强转即可
@@ -321,6 +327,8 @@ static void EnterRest() {
         FinishTraining();
         return;
     }
+
+    Application::GetInstance().NotifyRestEntered();
 
     /* === 根据 plan 中的 rest 秒数启动定时 === */
     int rest_sec = GetRestSeconds(g_cur_idx);
@@ -985,7 +993,7 @@ static const char* const STATE_STRINGS[] = {
     "activating",
     "audio_testing",
     "fatal_error",
-    "invalid_state"
+    "invalid_state",
     "POWER_OFF"
 };
 
@@ -1290,11 +1298,13 @@ void Application::handleStartTrainingJson(char* json)
         } else if (strcmp(event->valuestring, "skip_rest") == 0) {
             ESP_LOGI(TAG, "Received skip_rest event");
             SkipRest();
+            NotifyTrainingStarted();
             cJSON_Delete(root);
             return;
         } else if (strcmp(event->valuestring, "exit_training") == 0) {
             ESP_LOGI(TAG, "Received exit_training event");
             ExitTraining();
+            NotifyTrainingExited();
             cJSON_Delete(root);
             return;
 
@@ -1353,6 +1363,7 @@ void Application::handleStartTrainingJson(char* json)
     // 计划准备好就启动
     if (g_plan_sz > 0) {
         StartPlan();
+        NotifyTrainingStarted();
     } else {
         ESP_LOGW(TAG, "Empty training plan.");
     }
@@ -2372,6 +2383,35 @@ void Application::SendMcpMessage(const std::string& payload) {
         }
     });
 }
+
+// 统一设态：{"jsonrpc":"2.0","method":"notifications/state_set","params":{"mode":"idle|training|rest"}}
+void Application::SendMcpStateSet(const char* mode) {
+    if (!mode) return;
+    // 可选校验
+    if (strcmp(mode, "idle") && strcmp(mode, "training") && strcmp(mode, "rest")) {
+        ESP_LOGW(TAG, "SendMcpStateSet: invalid mode=%s", mode);
+        return;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(root, "method", "notifications/state_set");
+
+    cJSON* params = cJSON_CreateObject();
+    cJSON_AddStringToObject(params, "mode", mode);
+    cJSON_AddItemToObject(root, "params", params);
+
+    char* s = cJSON_PrintUnformatted(root);
+    if (s) {
+        this->SendMcpMessage(std::string(s));
+        cJSON_free(s);
+    }
+    cJSON_Delete(root);
+}
+
+void Application::NotifyTrainingStarted() { SendMcpStateSet("training"); } 
+void Application::NotifyRestEntered()     { SendMcpStateSet("rest"); }
+void Application::NotifyTrainingExited()  { SendMcpStateSet("idle"); }
 
 void Application::SetAecMode(AecMode mode) {
     aec_mode_ = mode;
