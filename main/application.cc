@@ -2491,7 +2491,6 @@ extern "C" void on_rep_scored_from_server(int rep, int rep_cnt,float score, int 
     rp1.score    = score;          // 服务器返回分
     rep_report.score   = score;
     ex_label = label_id;
-    Application::GetInstance().OnRepLabel(ex_label);
     send_rep_json(rp1);
     if (rep_cnt==rep_report.rep_idx){  // 确保 rep_cnt 是最新的
     rep_cnt = 0;
@@ -2512,4 +2511,5 @@ extern "C" void on_rep_scored_from_server(int rep, int rep_cnt,float score, int 
         g_record_items[g_cur_idx].scores.push_back(score);
     }
 }
+
 
