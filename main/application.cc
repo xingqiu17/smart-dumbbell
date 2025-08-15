@@ -30,6 +30,7 @@
 #include "http_client.h"
 #include <mutex>
 #include <algorithm>  
+#include "esp_system.h"  
 
 
 
@@ -155,7 +156,81 @@ static size_t   wrIdx   = 0;                   // 写指针
 
 
 
+// —— 当前组的鼓励触发计划与状态 —— 
+static std::vector<int> g_encourage_marks;   // 本组需要触发的 rep 索引（升序）
+static int g_last_encourage_rep = -1000;     // 上一次触发发生在第几个rep（防抖）
+static int g_encourage_fired = 0;            // 本组已触发次数（<=2）
 
+
+static int rand_between(int lo, int hi) {
+    if (hi <= lo) return lo;
+    uint32_t r = esp_random();
+    return lo + (int)(r % (uint32_t)(hi - lo + 1));
+}
+
+// 规划本组的鼓励触发点：至少1、最多2，均在后半程，且相隔≥2
+static void PlanEncourageForSet(int total_reps) {
+    g_encourage_marks.clear();
+    g_last_encourage_rep = -1000;
+    g_encourage_fired = 0;
+
+    if (total_reps <= 1) return;
+
+    int half_start = (total_reps + 1) / 2 + 1;   // ceil(N/2)+1
+    if (half_start > total_reps) half_start = total_reps;
+
+    // 至少1次，最多2次（随机决定是否要2次；小组数时只给1次）
+    int want = (total_reps >= 6 && (esp_random() & 1)) ? 2 : 1;
+
+    // 先挑第一个点
+    int a = rand_between(half_start, total_reps-1);
+    g_encourage_marks.push_back(a);
+
+    // 如需第二个点，强制与第一个相差≥2
+    if (want == 2) {
+        // 可选区间：half_start..total_reps 去掉 [a-1,a+1]
+        // 简单重试法找一个合法 b
+        for (int tries = 0; tries < 16; ++tries) {
+            int b = rand_between(half_start, total_reps);
+            if (std::abs(b - a) >= 2) {
+                g_encourage_marks.push_back(b);
+                break;
+            }
+        }
+    }
+
+    std::sort(g_encourage_marks.begin(), g_encourage_marks.end());
+    // 去重（极小概率随机重复）
+    g_encourage_marks.erase(
+        std::unique(g_encourage_marks.begin(), g_encourage_marks.end()),
+        g_encourage_marks.end()
+    );
+
+    // 若误打成只有一个点也OK（至少1次满足）
+}
+
+// 检查是否需要在当前 rep 触发一次鼓励；命中则发送 MCP 通知
+static void MaybeTriggerEncourage() {
+    if (g_encourage_fired >= 2) return;   // 最多两次
+
+    // 防抖：至少间隔2个rep
+    if (rep_cnt - g_last_encourage_rep < 2) return;
+
+    // 是否命中预定触发点
+    if (!g_encourage_marks.empty() &&
+        std::binary_search(g_encourage_marks.begin(), g_encourage_marks.end(), rep_cnt)) {
+
+        g_last_encourage_rep = rep_cnt;
+        g_encourage_fired++;
+
+        Application::GetInstance().SendMcpEncourage(
+            /*setOrder*/ g_cur_idx + 1,
+            /*repIndex*/ rep_cnt,
+            /*totalReps*/ rep_report.rep_idx,
+            /*exercise*/ (int)rep_report.ex
+        );
+    }
+}
 
 static int GetRestSeconds(int idx) {
     if (idx < 0 || idx >= g_plan_sz) return 0;
@@ -263,6 +338,10 @@ static void StartNextItem() {
     const char* zh = ActionName(rep_report.ex);          // 你的中文映射
     display->UpdateExercise(zh, 0 /*已完成次数*/, 0.0f);
     display->ShowPage("workout");
+
+    // 目标次数写好后
+    PlanEncourageForSet(rep_report.rep_idx);
+
 
     ESP_LOGI("TRAIN", "Start item #%d/%d: type=%d reps=%d weight=%.2f",
              g_cur_idx+1, g_plan_sz, it.type, it.reps, it.weight);
@@ -793,6 +872,8 @@ void Application::imu_task(void* arg)
                     float dP = pMax - pMin;
                     float dR = rMax - rMin;
                     rep_cnt++; // 计数
+
+                    MaybeTriggerEncourage();
                     
 
                 auto display = Board::GetInstance().GetDisplay();
@@ -2399,6 +2480,28 @@ void Application::SendMcpStateSet(const char* mode) {
 
     cJSON* params = cJSON_CreateObject();
     cJSON_AddStringToObject(params, "mode", mode);
+    cJSON_AddItemToObject(root, "params", params);
+
+    char* s = cJSON_PrintUnformatted(root);
+    if (s) {
+        this->SendMcpMessage(std::string(s));
+        cJSON_free(s);
+    }
+    cJSON_Delete(root);
+}
+
+void Application::SendMcpEncourage(int setOrder, int repIndex, int totalReps, int exercise) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(root, "method",  "notifications/encourage");
+
+    cJSON* params = cJSON_CreateObject();
+    cJSON_AddNumberToObject(params, "set",    setOrder);
+    cJSON_AddNumberToObject(params, "rep",    repIndex);
+    cJSON_AddNumberToObject(params, "total",  totalReps);
+    cJSON_AddNumberToObject(params, "exercise", exercise);
+    cJSON_AddStringToObject(params, "phase",  "late");
+    cJSON_AddStringToObject(params, "reason", "random");
     cJSON_AddItemToObject(root, "params", params);
 
     char* s = cJSON_PrintUnformatted(root);

@@ -128,6 +128,7 @@ public:
     void PlaySound(const std::string_view& sound);
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    void SendMcpEncourage(int setOrder, int repIndex, int totalReps, int exercise);
     // 统一设态 + 三个便捷封装
     void SendMcpStateSet(const char* mode);
     void NotifyTrainingStarted();

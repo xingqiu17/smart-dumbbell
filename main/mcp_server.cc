@@ -303,7 +303,8 @@ void McpServer::AddCommonTools() {
 
     // 查询某日的所有计划（只读，不创建）
     AddTool("self.plan.get_day",
-            "Only Use this tool to confirm the plan of the day,not start or create"
+            "If user wants to confirm the plan of the day,please use this tools."
+            "Only Use this tool to confirm the plan of the day,not start or create."
             "Get all plans for the given date of the current user. "
             "Args: date (YYYY-MM-DD or 'today'). "
             "Return: JSON array of plan sessions. "
@@ -575,7 +576,7 @@ void McpServer::AddCommonTools() {
                     if (!cJSON_IsObject(it)) continue;
                     cJSON* jt = cJSON_GetObjectItemCaseSensitive(it, "type");
                     cJSON* jn = cJSON_GetObjectItemCaseSensitive(it, "number");
-                    cJSON* jw = cJSON_GetObjectItemCaseSensitive(it, "tWeight");
+                    cJSON* jw = cJSON_GetObjectItem(it, "tWeight");
                     cJSON* jr = cJSON_GetObjectItemCaseSensitive(it, "rest");
                     if (!jt || !jn || !cJSON_IsNumber(jt) || !cJSON_IsNumber(jn)) continue;
 
