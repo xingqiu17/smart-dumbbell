@@ -1142,7 +1142,7 @@ void LcdDisplay::ShowPage(const std::string& id) {
     current_page_ = it->second;
 }
 
-void LcdDisplay::UpdateExercise(const std::string& name, int count, float score) {
+void LcdDisplay::UpdateExercise(const std::string& name, int count,int count1, float score) {
     DisplayLockGuard lock(this);
     if (!workout_page_) {
         workout_page_ = CreatePage("workout");
@@ -1160,7 +1160,7 @@ void LcdDisplay::UpdateExercise(const std::string& name, int count, float score)
 
     lv_label_set_text(workout_name_label_, name.c_str());
     char count_buf[16];
-    snprintf(count_buf, sizeof(count_buf), "%d", count);
+    snprintf(count_buf, sizeof(count_buf), "%d/%d", count,count1);
     lv_label_set_text(workout_count_label_, count_buf);
     char score_buf[16];
     snprintf(score_buf, sizeof(score_buf), "%.1f", score);

@@ -35,7 +35,7 @@ public:
     virtual void ShowPage(const std::string& id);
 
         // 训练信息更新
-    virtual void UpdateExercise(const std::string& name, int count, float score);
+    virtual void UpdateExercise(const std::string& name, int count,int count1, float score);
     virtual void UpdatePause(int action_id, int target_reps, int seconds);   // ← 新接口
     virtual void StopPause();                                               // 可选：提前终止
 

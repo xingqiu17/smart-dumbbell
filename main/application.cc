@@ -30,6 +30,9 @@
 #include "http_client.h"
 #include <mutex>
 #include <algorithm>  
+#include "esp_system.h"  
+#define SCORER_CB_IMPL_IN_APP 1
+#include "post.cc"
 
 
 
@@ -46,6 +49,8 @@ enum Axis {
     AXIS_Z = 2
 };
 
+static float gy_lp = 0.0f;
+
 /* ====================  动作配置表  ==================== */
 struct RepAlgoCfg {
     /* 计数—阈值及轴向 */
@@ -57,15 +62,18 @@ struct RepAlgoCfg {
     const char* model; // 你在 rep_scorer.h 里声明的类
 };
 
+int lastPrint = 0;
+int ex_label = 0; 
+
 static constexpr float DEG2RAD = 0.0174532925f; // conversion factor from degrees to radians
 
 /* ==== 配表：下标就是 Exercise 枚举 ==== */
 static const RepAlgoCfg kAlgoCfg[] = {
 /* EX_UNKNOWN */ { 0,0,1, nullptr },
-/* EX_AIDBC   */ { 12.5f*DEG2RAD, 2.5f*DEG2RAD, 1, "repModel_DWC" /*占位*/ },
+/* EX_DWC   */ { 12.5f*DEG2RAD, 2.5f*DEG2RAD, 1, "repModel_DWC" /*占位*/ },
                  /* …… */
- /* EX_DWC     */ { 12.5f*DEG2RAD, 2.5f*DEG2RAD, 1, "repModel_DWC" },
- /* EX_DLR     */ { 10.0f*DEG2RAD, 2.0f*DEG2RAD, 0, "repModel_DLR" },
+ /* EX_DLR     */ { 10.0f*DEG2RAD, 2.5f*DEG2RAD, 1, "repModel_DLR" },
+ /* EX_DLR     */ { 10.0f*DEG2RAD, 2.0f*DEG2RAD, 1, "repModel_DLR" },
  /* EX_DSP     */ { 15.0f*DEG2RAD, 3.0f*DEG2RAD, 2, "repModel_DSP" },
  /* EX_45DBP   */ { 14.0f*DEG2RAD, 3.0f*DEG2RAD, 2, "repModel_45DBP" },
  /* EX_IDBC    */ { 12.5f*DEG2RAD, 2.5f*DEG2RAD, 1, "repModel_IDBC" },
@@ -90,11 +98,33 @@ static inline FusionQuaternion QuaternionConjugate(const FusionQuaternion& q)
 }
 
 
+static float GYR_LSB_PER_DPS = 32.8f;    // 缺省按 ±1000 dps
+static float ACC_LSB_PER_G   = 16384.0f; // BMI270 在 ±2g 下是 16384
+
+static float bmi270_gyr_sens_lsb_per_dps(uint8_t range){
+    switch (range) {
+        case BMI2_GYR_RANGE_2000: return 16.4f;
+        case BMI2_GYR_RANGE_1000: return 32.8f;
+        case BMI2_GYR_RANGE_500:  return 65.6f;
+        case BMI2_GYR_RANGE_250:  return 131.2f;
+        case BMI2_GYR_RANGE_125:  return 262.4f;
+        default: return 32.8f;
+    }
+}
+static float bmi270_acc_sens_lsb_per_g(uint8_t range){
+    switch (range) {
+        case BMI2_ACC_RANGE_2G:  return 16384.0f;
+        case BMI2_ACC_RANGE_4G:  return 8192.0f;
+        case BMI2_ACC_RANGE_8G:  return 4096.0f;
+        case BMI2_ACC_RANGE_16G: return 2048.0f;
+        default: return 16384.0f;
+    }
+}
 
 //new
 float rms_omega_y = 0.0f; // 用于计算平滑度的 Y 轴角速度 RMSb
 
-RepReport rep_report = { EX_UNKNOWN, 0, 0.0f }; // 当前动作计数报告
+RepReport rep_report = { EX_DLR, 0, 0.0f }; // 当前动作计数报告
 
 
 
@@ -110,6 +140,7 @@ struct RecordItem {
     int tOrder;      // 组序号（1 起）
     float tWeight;   // 配重
     std::vector<float> scores; // 每次动作的得分
+    std::vector<int>   perfs;
 };
 static std::vector<RecordItem> g_record_items;
 
@@ -155,7 +186,81 @@ static size_t   wrIdx   = 0;                   // 写指针
 
 
 
+// —— 当前组的鼓励触发计划与状态 —— 
+static std::vector<int> g_encourage_marks;   // 本组需要触发的 rep 索引（升序）
+static int g_last_encourage_rep = -1000;     // 上一次触发发生在第几个rep（防抖）
+static int g_encourage_fired = 0;            // 本组已触发次数（<=2）
 
+
+static int rand_between(int lo, int hi) {
+    if (hi <= lo) return lo;
+    uint32_t r = esp_random();
+    return lo + (int)(r % (uint32_t)(hi - lo + 1));
+}
+
+// 规划本组的鼓励触发点：至少1、最多2，均在后半程，且相隔≥2
+static void PlanEncourageForSet(int total_reps) {
+    g_encourage_marks.clear();
+    g_last_encourage_rep = -1000;
+    g_encourage_fired = 0;
+
+    if (total_reps <= 1) return;
+
+    int half_start = (total_reps + 1) / 2 + 1;   // ceil(N/2)+1
+    if (half_start > total_reps) half_start = total_reps;
+
+    // 至少1次，最多2次（随机决定是否要2次；小组数时只给1次）
+    int want = (total_reps >= 6 && (esp_random() & 1)) ? 2 : 1;
+
+    // 先挑第一个点
+    int a = rand_between(half_start, total_reps-1);
+    g_encourage_marks.push_back(a);
+
+    // 如需第二个点，强制与第一个相差≥2
+    if (want == 2) {
+        // 可选区间：half_start..total_reps 去掉 [a-1,a+1]
+        // 简单重试法找一个合法 b
+        for (int tries = 0; tries < 16; ++tries) {
+            int b = rand_between(half_start, total_reps);
+            if (std::abs(b - a) >= 2) {
+                g_encourage_marks.push_back(b);
+                break;
+            }
+        }
+    }
+
+    std::sort(g_encourage_marks.begin(), g_encourage_marks.end());
+    // 去重（极小概率随机重复）
+    g_encourage_marks.erase(
+        std::unique(g_encourage_marks.begin(), g_encourage_marks.end()),
+        g_encourage_marks.end()
+    );
+
+    // 若误打成只有一个点也OK（至少1次满足）
+}
+
+// 检查是否需要在当前 rep 触发一次鼓励；命中则发送 MCP 通知
+static void MaybeTriggerEncourage() {
+    if (g_encourage_fired >= 2) return;   // 最多两次
+
+    // 防抖：至少间隔2个rep
+    if (rep_cnt - g_last_encourage_rep < 2) return;
+
+    // 是否命中预定触发点
+    if (!g_encourage_marks.empty() &&
+        std::binary_search(g_encourage_marks.begin(), g_encourage_marks.end(), rep_cnt)) {
+
+        g_last_encourage_rep = rep_cnt;
+        g_encourage_fired++;
+
+        Application::GetInstance().SendMcpEncourage(
+            /*setOrder*/ g_cur_idx + 1,
+            /*repIndex*/ rep_cnt,
+            /*totalReps*/ rep_report.rep_idx,
+            /*exercise*/ (int)rep_report.ex
+        );
+    }
+}
 
 static int GetRestSeconds(int idx) {
     if (idx < 0 || idx >= g_plan_sz) return 0;
@@ -198,6 +303,8 @@ static void FinishTraining() {
             cJSON* w = cJSON_CreateObject();
             cJSON_AddNumberToObject(w, "acOrder", (int)j + 1);
             cJSON_AddNumberToObject(w, "score",   static_cast<int>(it.scores[j] + 0.5f));
+            int perf = (j < (int)it.perfs.size())  ? it.perfs[j] : 0;  // ★ ex_label 原样入库
+            cJSON_AddNumberToObject(w, "performance",  perf);
             cJSON_AddItemToArray(works, w);
         }
         cJSON_AddItemToObject(obj, "works", works);
@@ -235,6 +342,15 @@ static void FinishTraining() {
 }
 
 
+void Application::OnRepLabel(int ex_label) {
+    std::lock_guard<std::mutex> lk(g_record_mtx);
+    if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
+        g_record_items[g_cur_idx].perfs.push_back(ex_label);
+        ESP_LOGI("FIT", "record perf (ex_label)=%d at set=%d, rep=%zu",
+                 ex_label, g_cur_idx + 1, g_record_items[g_cur_idx].perfs.size());
+    }
+}
+
 
 static void StartNextItem() {
     rep_cnt = 0;
@@ -258,11 +374,18 @@ static void StartNextItem() {
 
     g_item_running = true;
 
+    extern void rawlog_set_action(int action_id);
+    rawlog_set_action(it.type);
+
     /* ---- 在这里刷新训练页 ---- */
     auto  display = Board::GetInstance().GetDisplay();
     const char* zh = ActionName(rep_report.ex);          // 你的中文映射
-    display->UpdateExercise(zh, 0 /*已完成次数*/, 0.0f);
+    display->UpdateExercise(zh, rep_cnt,rep_report.rep_idx, /*已完成次数*/rep_report.score);
     display->ShowPage("workout");
+
+    // 目标次数写好后
+    PlanEncourageForSet(rep_report.rep_idx);
+
 
     ESP_LOGI("TRAIN", "Start item #%d/%d: type=%d reps=%d weight=%.2f",
              g_cur_idx+1, g_plan_sz, it.type, it.reps, it.weight);
@@ -272,7 +395,7 @@ static void StartPlan() {
     std::lock_guard<std::mutex> lk(g_record_mtx);
     g_record_items.clear();
     for (int i = 0; i < g_plan_sz; ++i) {
-        g_record_items.push_back({g_plan[i].type, 0, i + 1, g_plan[i].weight, {}});
+        g_record_items.push_back({g_plan[i].type, 0, i + 1, g_plan[i].weight, {}, {}});
     }
     g_cur_idx = -1;
     g_item_running = false;
@@ -409,6 +532,7 @@ void send_rep_json(const RepReport& rp)
     cJSON_AddNumberToObject(root, "exercise", rp.ex);
     cJSON_AddNumberToObject(root, "rep",      rp.rep_idx);
     cJSON_AddNumberToObject(root, "score",    rp.score);
+    cJSON_AddNumberToObject(root, "ex_label", ex_label);
 
     char* msg = cJSON_PrintUnformatted(root);      // 动态分配
     esp_err_t err = sendToClient(msg);                // 你 websocket 的封装
@@ -530,9 +654,9 @@ FusionAhrsInitialise(&ahrs);          // 内部自带默认参数 :contentRefere
 FusionAhrsSettings settings = {
     .convention            = FusionConventionNwu, // NWU/NED/ENU 三选一
     .gain                  = 0.8f,               // 相当于 Madgwick β :contentReference[oaicite:2]{index=2}
-    .gyroscopeRange        = 250.0f,              // °/s，决定“角速度恢复”阈值
+    .gyroscopeRange        = 1000.0f,              // °/s，决定“角速度恢复”阈值
     .accelerationRejection = 10.0f,               // 动态拒绝直线加速度 (°)
-    .magneticRejection     = 15.0f,               // 动态拒绝磁畸变   (°)
+    .magneticRejection     = 5.0f,               // 动态拒绝磁畸变   (°)
     .recoveryTriggerPeriod = 5,                   // 5 个采样点触发恢复
 };
 FusionAhrsSetSettings(&ahrs, &settings);          // 应用自定义参数 :contentReference[oaicite:3]{index=3}
@@ -546,6 +670,10 @@ FusionAhrsSetSettings(&ahrs, &settings);          // 应用自定义参数 :cont
     /* 2-1) 给 ACC / GYR 一个最基本的 ODR（100 Hz）——随意 */
     cfg[0].cfg.acc.odr = BMI2_ACC_ODR_100HZ;
     cfg[1].cfg.gyr.odr = BMI2_GYR_ODR_100HZ;
+    
+        // 2) 量程：二选一（建议先用这个，防饱和）
+    cfg[0].cfg.acc.range = BMI2_ACC_RANGE_8G;       // 弯举幅度/抖动稍大时更稳
+    cfg[1].cfg.gyr.range = BMI2_GYR_RANGE_1000;  // 足够避免饱和
 
     /* 2-2) AUX 手动模式参数（完全抄官方例程）*/
     auto &aux = cfg[2].cfg.aux;
@@ -559,6 +687,10 @@ FusionAhrsSetSettings(&ahrs, &settings);          // 应用自定义参数 :cont
 
     ESP_ERROR_CHECK(bmi270_set_sensor_config(cfg, 3, &bmi));
     ESP_ERROR_CHECK(bmi270_sensor_enable((uint8_t[]){BMI2_ACCEL,BMI2_GYRO,BMI2_AUX},3,&bmi));
+
+        // 3) 量程→灵敏度（LSB/°/s、LSB/g）
+    GYR_LSB_PER_DPS = bmi270_gyr_sens_lsb_per_dps(cfg[1].cfg.gyr.range);
+    ACC_LSB_PER_G   = bmi270_acc_sens_lsb_per_g  (cfg[0].cfg.acc.range);
 
     /**************************************************************************/
     /* ---------- 3. 手动模式下跑 bmm150_init() ---------- */
@@ -631,25 +763,30 @@ void Application::imu_task(void* arg)
     bmi2_sens_data imu{};      // 本地缓冲
     bmm150_mag_data mag{}; 
     float          mag_uT[3];
+    static float w_lp = 0.f;                     // 一阶低通
 
     while (true)
     {   
-        if(is_rep_counting){
+        
         if (bmi2_get_sensor_data(&imu, &bmi) == BMI2_OK) {
             /* ====== ① 推进队列 ====== */
             if (s_imuQueue) { xQueueOverwrite(s_imuQueue, &imu); }
                         /* ====== 姿态解算 ====== */
-            constexpr float ACC_LSB = 16384.0f;             // ±2 g
-            constexpr float GYR_LSB = 131.0f;               // ±250 °/s
             constexpr float DEG2RAD = 0.0174532925f;
 
-            // 1) 原始计数 -> 物理量
-            float ax =  imu.acc.x / ACC_LSB ;
-            float ay =  imu.acc.y / ACC_LSB ;
-            float az =  imu.acc.z / ACC_LSB ;
-            float gx = (imu.gyr.x / GYR_LSB) * DEG2RAD;
-            float gy = (imu.gyr.y / GYR_LSB) * DEG2RAD;
-            float gz = (imu.gyr.z / GYR_LSB) * DEG2RAD;
+            float ax =  imu.acc.x / ACC_LSB_PER_G;
+            float ay =  imu.acc.y / ACC_LSB_PER_G;
+            float az =  imu.acc.z / ACC_LSB_PER_G;
+
+            float gx = (imu.gyr.x / GYR_LSB_PER_DPS) * DEG2RAD;
+            float gy = (imu.gyr.y / GYR_LSB_PER_DPS) * DEG2RAD;
+            float gz = (imu.gyr.z / GYR_LSB_PER_DPS) * DEG2RAD;
+
+            // 可选：限幅，避免偶发毛刺把 LPF 拉爆
+            const float MAX_RAD_S = 1000.0f * DEG2RAD; // 1000 dps
+            gx = fminf(fmaxf(gx, -MAX_RAD_S), MAX_RAD_S);
+            gy = fminf(fmaxf(gy, -MAX_RAD_S), MAX_RAD_S);
+            gz = fminf(fmaxf(gz, -MAX_RAD_S), MAX_RAD_S);
             constexpr float LSB2UT = 0.0625f;
             if (bmm150_aux_mag_data(imu.aux_data, &mag, &bmm) == BMM150_OK) {
             mag_uT[0] = mag.x * LSB2UT;
@@ -665,320 +802,179 @@ void Application::imu_task(void* arg)
             
 
 
-            // 2) 更新四元数（9 轴）
-        FusionVector gyro = {.axis = {gx,  gy,  gz}};
-        FusionVector acc  = {.axis = {ax,    ay,    az}};
-        FusionVector mag1  = {.axis = {mag_uT[0],   mag_uT[1],   mag_uT[2]}};
-        FusionAhrsUpdate(&ahrs, gyro, acc, mag1, dt);
-
-                imuBuf[wrIdx] = { imu.acc.x/ACC_LSB,
-                        imu.acc.y/ACC_LSB,
-                        imu.acc.z/ACC_LSB,
-                        gx, gy, gz,
-                        now_us };
-        wrIdx = (wrIdx + 1) % IMU_BUF_LEN;
- 
-        
-                        // ***** 在读完 ax…gz 之后 *****
-        if (seqLen < MAX_RAW_FRAMES) {
-            seqBuf[seqLen][0] = gx;  
-            seqBuf[seqLen][1] = gy;
-            seqBuf[seqLen][2] = gz;
-            seqBuf[seqLen][3] = ax;
-            seqBuf[seqLen][4] = ay;
-            seqBuf[seqLen][5] = az;
-            ++seqLen;
-        }
-
-            // 3) 取俯仰角
-                        /* ---------- 计数 & 分类核心 ---------- */
-            // constexpr float GYR_TH   = 12.5f * DEG2RAD;   
-            // constexpr float GYR_HYST =  2.5f * DEG2RAD;   
-            static uint64_t cycle_start_us = 0;           // 回合开始时间
-                        /* ---- 本 rep 的临时统计量（static 保存在多次循环之间） ---- */
-            static float     peak_gyr_y   = 0.0f;    // |gy| 峰值
-            static float     sum_gyr_y    = 0.0f;    // |gy| 积分
-            static uint32_t  sample_cnt   = 0;       // 计数
-            static float     peak_acc_mag = 0.0f;    // √(ax²+ay²+az²) 峰值
-            static uint64_t  t_phase_start = 0;
+                // 2) 更新四元数（9 轴）
+            FusionVector gyro = {.axis = {gx,  gy,  gz}};
+            FusionVector acc  = {.axis = {ax,    ay,    az}};
+            FusionVector mag1  = {.axis = {mag_uT[0],   mag_uT[1],   mag_uT[2]}};
+            FusionAhrsUpdate(&ahrs, gyro, acc, mag1, dt);
 
             const RepAlgoCfg& cfg = kAlgoCfg[rep_report.ex];
-            const float  GYR_TH   = cfg.gyr_th;// 上升 / 下降阈值
-            const float  GYR_HYST = cfg.gyr_hyst;// 静止滞环
 
                         /* 选取本次采样做计数的原始角速度 --------- */
             float gyro_raw_all[3] = {
-                (imu.gyr.x / GYR_LSB) * DEG2RAD,
-                (imu.gyr.y / GYR_LSB) * DEG2RAD,
-                (imu.gyr.z / GYR_LSB) * DEG2RAD
+                gx,gy,gz
             };
             float gy_raw = gyro_raw_all[cfg.axis];
 
-            /* 做一次一阶 LPF */
-            static float gy_lp = 0.0f;
+            
             gy_lp = 0.8f * gy_lp + 0.2f * gy_raw;
+            float gy_main = gy_lp; // 主要用 Y 轴（上举/下放）
 
             /* 取实时 pitch / roll（°）*/
             FusionEuler eu = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
             float pitch = eu.angle.pitch;
             float roll  = eu.angle.roll;
+            float yaw   = eu.angle.yaw;
+            FusionQuaternion q = FusionAhrsGetQuaternion(&ahrs);
+
+                        // ====== 1) 四元数相对旋转 -> 角速度向量 omega (rad/s) ======
+            auto q_conj = [](FusionQuaternion a){ return FusionQuaternion{ .element = { a.element.w, -a.element.x, -a.element.y, -a.element.z } }; };
+            auto q_mul  = [](FusionQuaternion a, FusionQuaternion b){
+                FusionQuaternion r;
+                r.element.w = a.element.w*b.element.w - a.element.x*b.element.x - a.element.y*b.element.y - a.element.z*b.element.z;
+                r.element.x = a.element.w*b.element.x + a.element.x*b.element.w + a.element.y*b.element.z - a.element.z*b.element.y;
+                r.element.y = a.element.w*b.element.y - a.element.x*b.element.z + a.element.y*b.element.w + a.element.z*b.element.x;
+                r.element.z = a.element.w*b.element.z + a.element.x*b.element.y - a.element.y*b.element.x + a.element.z*b.element.w;
+                return r;
+            };
+            // shortest-path：保证 dq.w >= 0，避免走大于 π 的弧
+            auto quat_shortest = [](FusionQuaternion &q){ if (q.element.w < 0){ q.element.w=-q.element.w; q.element.x=-q.element.x; q.element.y=-q.element.y; q.element.z=-q.element.z; } };
+            // log 映射为旋转向量（弧度）
+            auto rotvec_from_delta = [](FusionQuaternion dq){
+                const float w = dq.element.w;
+                const float vx = dq.element.x, vy = dq.element.y, vz = dq.element.z;
+                const float vnorm = sqrtf(vx*vx + vy*vy + vz*vz);
+                if (vnorm < 1e-9f) return std::array<float,3>{0.f,0.f,0.f};
+                const float angle = 2.0f * atan2f(vnorm, w);
+                if (angle < 1e-9f) return std::array<float,3>{0.f,0.f,0.f};
+                const float s = angle / vnorm; // 轴 * 角
+                return std::array<float,3>{ vx*s, vy*s, vz*s };
+            };
+
+            static bool q_inited = false;
+            static FusionQuaternion q_prev{};
+            FusionQuaternion q_now = FusionAhrsGetQuaternion(&ahrs);
+            if (!q_inited) { q_prev = q_now; q_inited = true; }
+
+            FusionQuaternion dq = q_mul(q_conj(q_prev), q_now);
+            quat_shortest(dq);
+            auto rvec = rotvec_from_delta(dq);           // 弧度
+            q_prev = q_now;
+
+            std::array<float,3> omega = { 0.f, 0.f, 0.f };
+            if (dt > 0.f) { omega = { rvec[0]/dt, rvec[1]/dt, rvec[2]/dt }; } // rad/s
+
+            // ====== 2) 选择主方向 n 并得到标量主轴角速度 w_main ======
+            std::array<float,3> n = {0.f,0.f,0.f};
+            // 用你已有的 cfg.axis：0->X, 1->Y, 2->Z
+            if (cfg.axis == 0) n = {1.f,0.f,0.f};
+            else if (cfg.axis == 1) n = {0.f,1.f,0.f};
+            else                    n = {0.f,0.f,1.f};
+
+            auto dot3 = [](const std::array<float,3>& a, const std::array<float,3>& b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
+            float w_main = dot3(omega, n);               // rad/s
+
+            w_lp = 0.8f * w_lp + 0.2f * w_main;
             
-                        /* feed RMS 缓冲 —— 放在采样更新最底部 */
-            static float win_omega2[50];              // 0.5 s 窗口（100 Hz）
-            static int   win_pos = 0;
 
-            win_omega2[win_pos] = gy_raw*gy_raw;      // 原始 Y 轴角速度平方
-            win_pos = (win_pos + 1) % 50;
+            
 
-            float sum = 0;
-            for (float v : win_omega2) sum += v;
-            rms_omega_y = sqrtf(sum / 50) / DEG2RAD;  // 转回 °/s
-            /* ---- 计算实时 RMS 平滑度 —— */
+            // ====== 3) 主轴“位移” s（弧度），用于 ROM 与回落判据 ======
+            static float s = 0.f;                        // 从本次上举开始累计
+            static float s_at_up = 0.f, s_top = 0.f;
+            s += w_main * dt;                            // 积分（rad）
 
-            /* ---- 本次采样的加速度模长 ---- */
-            float acc_mag = sqrtf(ax*ax + ay*ay + az*az);   // ★★★ NEW
-        
-            /* ------------ 四状态机 ------------- */
+
+                        // —— 阈值（沿用 cfg.gyr_th / gyr_hyst，它们本来就是 rad/s）
+            const float TH_UP     = cfg.gyr_th;          // 上举进入阈值（rad/s）
+            const float TH_HYST   = cfg.gyr_hyst;        // 静止滞环（rad/s）
+            const float TH_DOWN   = TH_UP * 0.8f;        // 下放进入阈值（rad/s）
+            const float TH_FIN    = fmaxf(TH_HYST, 5.0f * DEG2RAD); // ≥5°/s
+            const float MIN_UP_ROM = 15.0f * DEG2RAD;    // 至少抬起 15°
+            const float DROP_FROM_TOP = 3.0f * DEG2RAD;  // 自峰值回落 3° 也算开始下降
+
+            static uint64_t t_up_us = 0, t_top_us = 0;
+            static int dwell_top=0, dwell_fin=0;
+            const int DWELL_TOP_FR = 2, DWELL_FIN_FR = 3;
+            const uint32_t UP_TIMEOUT_MS=10000, TOP_WAIT_MS=500;
+
+            push_sample(rep_cnt, now_us,
+            ax, ay, az,
+            gx, gy, gz,
+            q.element.w, q.element.x, q.element.y, q.element.z,
+            yaw, pitch, roll);
+            if(is_rep_counting){
             switch (phase) {
             case PHASE_IDLE:
-                if (gy_lp > GYR_TH) {                    // 开始上举
+                dwell_top = dwell_fin = 0;
+                s = 0.f; s_at_up = 0.f; s_top = 0.f;
+                if (w_lp > TH_UP) {
+                    segment_start();
                     phase = PHASE_UP;
-                    pMax = pMin = pitch;                 // 清极值
-                    rMax = rMin = roll ;
-                    cycle_start_us = now_us;                    // 复位计时
-                    t_phase_start = now_us;
-                    peak_gyr_y = fabsf(gy_raw);
-
-                                        /* ★★★ NEW: 清零统计量 */
-                    peak_gyr_y   = fabsf(gy_raw);
-                    sum_gyr_y    = fabsf(gy_raw);
-                    sample_cnt   = 1;
-                    peak_acc_mag = acc_mag;
+                    t_up_us = now_us;
+                    s_at_up = s; s_top = s;
                 }
                 break;
 
             case PHASE_UP:
-                pMax = std::max(pMax, pitch);
-                pMin = std::min(pMin, pitch);
-                rMax = std::max(rMax, roll );
-                rMin = std::min(rMin, roll );
-                            /* ★★★ NEW: 累积统计 */
-                peak_gyr_y   = std::max(peak_gyr_y, fabsf(gy_raw));
-                sum_gyr_y   += fabsf(gy_raw);
-                peak_acc_mag = std::max(peak_acc_mag, acc_mag);
-                ++sample_cnt;
-                if (fabsf(gy_lp) < GYR_HYST){             // 到顶
-                    phase = PHASE_TOP;
+                if (s > s_top) s_top = s;
+                if (fabsf(w_lp) < TH_HYST && (s_top - s_at_up) >= MIN_UP_ROM) {
+                    if (++dwell_top >= DWELL_TOP_FR) {
+                        phase = PHASE_TOP;
+                        t_top_us = now_us;
+                        dwell_top = 0;
+                    }
+                } else dwell_top = 0;
+
+                if ((now_us - t_up_us)/1000U > UP_TIMEOUT_MS) { // 超时兜底
+                    segment_end((int)(rep_report.ex),rep_cnt);
+                    phase = PHASE_IDLE;
                 }
                 break;
 
             case PHASE_TOP:
-                if (gy_lp < -GYR_TH){                     // 开始下降
+                if (w_lp < -TH_DOWN || (s_top - s) >= DROP_FROM_TOP) {
                     phase = PHASE_DOWN;
-                    t_phase_start = now_us;
-            }
+                }
+                if ((now_us - t_top_us)/1000U > TOP_WAIT_MS) {
+                    phase = PHASE_DOWN;
+                }
                 break;
 
             case PHASE_DOWN:
-                pMax = std::max(pMax, pitch);
-                pMin = std::min(pMin, pitch);
-                rMax = std::max(rMax, roll );
-                rMin = std::min(rMin, roll );
-                                /* ★★★ NEW: 累积统计 */
-                peak_gyr_y   = std::max(peak_gyr_y, fabsf(gy_raw));
-                sum_gyr_y   += fabsf(gy_raw);
-                peak_acc_mag = std::max(peak_acc_mag, acc_mag);
-                ++sample_cnt;
-                if (fabsf(gy_lp) < GYR_HYST) {           // 动作完成
-                    float dP = pMax - pMin;
-                    float dR = rMax - rMin;
-                    rep_cnt++; // 计数
-                    
-
-                auto display = Board::GetInstance().GetDisplay();
-                display->UpdateExercise(ActionName(rep_report.ex),   // 中文名
-                                        rep_cnt,                     // 当前完成数
-                                        0.9);                      // 即时分数
-
-
-
-
-
-                    uint64_t rep_us   = now_us - cycle_start_us;   // 本次用时
-
-                                /* ================= 生成 7 维特征 ================= */
-                    float repDur_s = (now_us - cycle_start_us) * 1e-6f;               // rep 总时长
-                    float tempo    = repDur_s;                                        // 你训练里若是 up/down 比例可改
-
-                    float avgGyro  = (sample_cnt ? sum_gyr_y / sample_cnt : 0.0f);    // 平均 |gy|
-                                    /* ------- 你原来的结束状态里，计算好每回合的统计量 -------- */
-                    float romPitch  = dP;                  // 俯仰范围  (°)
-                    float romRoll   = dR;                  // 滚转范围  (°)
-                    float smooth    = rms_omega_y;         // 抖动指标(°/s)
-                    float maxAcc    = peak_acc_mag;             // 例：回合峰值加速度(g)
-                    float repDur    = repDur_s;                // 如果训练用了同一项可重复
-
-                    float features[7] = {
-                        romPitch,
-                        romRoll,
-                        tempo,
-                        smooth,
-                        avgGyro,
-                        maxAcc,
-                        repDur
-                    };
-                    float score = 0.0f; // 模型输出分数
-                    int exercise = rep_report.ex; // 当前动作类型
-                    /* ------- 调用模型 -------- */
-                    
-                    /* 你愿意的话再映射到 0–100 或做平滑 */
-                    score = std::clamp(score, 0.f, 100.f);
-
-                    if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
-                        g_record_items[g_cur_idx].scores.push_back(score);
-                        g_record_items[g_cur_idx].num = rep_cnt;
+                const bool still_w = fabsf(w_lp)    < TH_FIN;
+                const bool still_g = fabsf(gy_main) < TH_FIN;  // 这里用你前面已算的 raw 陀螺低通
+                if (still_w || still_g) {
+                    if (++dwell_fin >= DWELL_FIN_FR) {
+                        rep_cnt++;
+                        segment_end((int)(rep_report.ex),rep_cnt);
+                        phase = PHASE_IDLE;
+                        dwell_fin = 0;
                     }
-
-                    if (rep_cnt == rep_report.rep_idx) {
-                        is_rep_counting = false;
-                        g_item_running = false;
-                        Application::GetInstance().Schedule([]() {
-                            EnterRest();
-                        });
-                    }
-                    
-                    
-                    /* ---------- 3.1 200×6 重采样 ---------- */
-                    constexpr int TARGET_LEN = 200;
-                    constexpr int MAX_JSON   = 12 * TARGET_LEN * 6 + 160;   // 15 KB 裁剪裕量
-                    static char   jsonBuf[MAX_JSON];
-
-                    char *p = jsonBuf;
-                    int  n  = snprintf(                     // 先写头
-                            p, MAX_JSON,
-                            "{\"code\":\"%s\",\"rep\":%d,\"seq\":[",
-                            kExerciseStr[rep_report.ex],    // ★ 确保字符串数组里和服务器端一致
-                            rep_cnt);
-                    if (n <= 0 || n >= MAX_JSON) return;    // 理论不会
-
-                    p += n;                                 // p 指向下一写入位置
-
-                    for (int k = 0; k < TARGET_LEN; ++k) {
-                        float idx = k * (seqLen - 1.0f) / (TARGET_LEN - 1); // 连续坐标 0…len-1
-                        int   i0  = (int)idx;
-                        float t   = idx - i0;
-
-                        float frame[6];
-                        if (i0 >= seqLen - 1) {             // ★ 边界：最后一个点直接拷贝
-                            memcpy(frame, seqBuf[seqLen - 1], sizeof(frame));
-                        } else {
-                            for (int c = 0; c < 6; ++c)
-                                frame[c] = seqBuf[i0][c] * (1 - t) + seqBuf[i0 + 1][c] * t;
-                        }
-
-                        n = snprintf(p, MAX_JSON - (p - jsonBuf),
-                                    "[%.5f,%.5f,%.5f,%.5f,%.5f,%.5f]%s",
-                                    frame[0], frame[1], frame[2],
-                                    frame[3], frame[4], frame[5],
-                                    (k == TARGET_LEN - 1 ? "]}" : ","));
-                        if (n <= 0 || n >= MAX_JSON - (p - jsonBuf)) {
-                            ESP_LOGE("JSON", "jsonBuf overflow!");
-                            return;                         // 保护：不发送不完整 JSON
-                        }
-                        p += n;
-                    }
-
-                    /* ---------- 3.2 发送 ---------- */
-                    * p = '\0';                             // 保险：确认以 0 结尾
-                    esp_err_t err = sendToServer(jsonBuf);
-                    if (err != ESP_OK) {
-                        ESP_LOGE("HTTP_SRV", "sendToServer failed: %s", esp_err_to_name(err));
-                    }
-                    else{
-                        ESP_LOGI("HTTP_SRV", "sendToServer OK: ");
-                    }
-
-                    /* 清空缓存，准备下一 rep */
-                    seqLen = 0;
-                    
-                    /* 生成报告 */
-                    RepReport rp2client;
-                    rp2client.ex       = rep_report.ex;
-                    rp2client.rep_idx  = rep_cnt;
-                    rp2client.score    = score;
-                    send_rep_json(rp2client);
-
-
-                    
-
-
-                    /* 保存最近 N 次得分做滑动平均 */
-                    static constexpr int N = 5;
-                    static float score_hist[N] = {0};
-                    static int   sh_idx = 0;
-
-                    score_hist[sh_idx] = score;
-                    sh_idx = (sh_idx + 1) % N;
-
-                    float avg = 0;
-                    for (int i=0;i<N;++i) avg += score_hist[i];
-                    avg /= N;
-
-                    ESP_LOGI("FIT",
-                            "Rep=%d  act=%d  ΔP=%.1f  ΔR=%.1f  t=%.2f s  score=%.1f  avg=%.1f",
-                            rep_cnt, rep_report.ex, dP, dR, rep_us/1e6f, score, avg);
-
-                    phase = PHASE_IDLE;
+                } else {
+                    dwell_fin = 0;
                 }
                 break;
             }
-
-
-
+                      }  
             /* ④ —— 欧拉角 & 原始 9 轴同时打印 —— */
-            static uint64_t lastPrint = 0;
-            if (now_us - lastPrint > 200000) {          // 200 ms 一次
-                lastPrint = now_us;
-                FusionEuler eu = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
-                float yaw   = eu.angle.yaw;
-                float pitch = eu.angle.pitch;
-                float roll  = eu.angle.roll;
-
-                ESP_LOGI("9DOF",
-                        "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
-                        "ACC[g]=%.3f,%.3f,%.3f  "
-                        "GYR[dps]=%.1f,%.1f,%.1f  "
-                        "MAG[uT]=%.1f,%.1f,%.1f", 
-                        yaw, pitch, roll,
-                        imu.acc.x/ACC_LSB, imu.acc.y/ACC_LSB, imu.acc.z/ACC_LSB,
-                        gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD,
-                        mag_uT[0], mag_uT[1], mag_uT[2]);
-            }
-
-
-            /* ====== ② 仍然打印日志 ====== */
-            if (bmm150_aux_mag_data(imu.aux_data, &mag, &bmm) == BMM150_OK) {
-                constexpr float LSB2UT = 0.0625f;
-                mag_uT[0] = mag.x * LSB2UT;
-                mag_uT[1] = mag.y * LSB2UT;
-                mag_uT[2] = mag.z * LSB2UT;
-                if (s_magQueue){
-                    /* 直接写 3 * float, 注意长度要与队列创建时一致 */
-                    xQueueOverwrite(s_magQueue, mag_uT);
-                }
-            }
-            
-
+             if (now_us - lastPrint > 200000) {          // 200 ms 一次
+                 lastPrint = now_us;
+                 ESP_LOGI("9DOF",
+                         "PHASE =%d b_cnt=%d  "
+                         "Yaw/Pitch/Roll=%.1f/%.1f/%.1f  "
+                         "ACC[g]=%.3f,%.3f,%.3f  "
+                         "GYR[dps]=%.1f,%.1f,%.1f  ", 
+                         phase,b_cnt,
+                         yaw, pitch, roll,
+                         ax, ay, az,
+                         gx/DEG2RAD, gy/DEG2RAD, gz/DEG2RAD
+                         );
+             }
         }
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));      // 
+         vTaskDelay(pdMS_TO_TICKS(10));      //
     }
 }
-
-
-
-
-
 
 
 static const char* const STATE_STRINGS[] = {
@@ -1576,6 +1572,7 @@ void Application::Start() {
             if (!ws_started) {
                 ESP_LOGI(TAG, "获取到 IP，启动 WebSocket 服务");
                 websocket_server_start();
+                rawlog_set_network_ready();
                 ws_started = true;
             }
         },
@@ -2409,6 +2406,28 @@ void Application::SendMcpStateSet(const char* mode) {
     cJSON_Delete(root);
 }
 
+void Application::SendMcpEncourage(int setOrder, int repIndex, int totalReps, int exercise) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+    cJSON_AddStringToObject(root, "method",  "notifications/encourage");
+
+    cJSON* params = cJSON_CreateObject();
+    cJSON_AddNumberToObject(params, "set",    setOrder);
+    cJSON_AddNumberToObject(params, "rep",    repIndex);
+    cJSON_AddNumberToObject(params, "total",  totalReps);
+    cJSON_AddNumberToObject(params, "exercise", exercise);
+    cJSON_AddStringToObject(params, "phase",  "late");
+    cJSON_AddStringToObject(params, "reason", "random");
+    cJSON_AddItemToObject(root, "params", params);
+
+    char* s = cJSON_PrintUnformatted(root);
+    if (s) {
+        this->SendMcpMessage(std::string(s));
+        cJSON_free(s);
+    }
+    cJSON_Delete(root);
+}
+
 void Application::NotifyTrainingStarted() { SendMcpStateSet("training"); } 
 void Application::NotifyRestEntered()     { SendMcpStateSet("rest"); }
 void Application::NotifyTrainingExited()  { SendMcpStateSet("idle"); }
@@ -2458,5 +2477,32 @@ void Application::score_poll_task(void*){
     }
 }
 
+extern "C" void on_rep_scored_from_server(int rep, int rep_cnt,float score, int label_id, const char* label_name) {
+    RepReport rp1;
+    rp1.ex       = rep_report.ex;  // 当前的锻炼编号
+    rp1.rep_idx  = rep_cnt;        // 最近一次完成的编号
+    rp1.score    = score;          // 服务器返回分
+    rep_report.score   = score;
+    ex_label = label_id;
+    Application::GetInstance().OnRepLabel(ex_label);
+    send_rep_json(rp1);
+    if (rep_cnt==rep_report.rep_idx){  // 确保 rep_cnt 是最新的
+    rep_cnt = 0;
+    is_rep_counting = false;  // 重置计数状态
+    EnterRest();
+    }
+    else{
+    auto  display = Board::GetInstance().GetDisplay();
+    const char* zh = ActionName(rep_report.ex);          // 你的中文映射
+    display->UpdateExercise(zh, rep_cnt,rep_report.rep_idx, /*已完成次数*/rep_report.score);
+    display->ShowPage("workout");}
 
+
+    ESP_LOGI("FIT", "Score=%.2f label=%d(%s) rep=%d ex=%d",
+             score, label_id, (label_name?label_name:""), rep, rep_report.ex);
+
+    if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
+        g_record_items[g_cur_idx].scores.push_back(score);
+    }
+}
 

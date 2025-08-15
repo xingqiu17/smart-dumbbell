@@ -258,7 +258,7 @@ void Display::ShowPage(const std::string& id) {
     // Base display does not implement page switching
 }
 
-void Display::UpdateExercise(const std::string& name, int count, float score) {
+void Display::UpdateExercise(const std::string& name, int count,int count1, float score) {
     // Base display does not show exercise info
 }
 

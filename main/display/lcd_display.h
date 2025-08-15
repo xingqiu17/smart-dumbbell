@@ -12,9 +12,9 @@
 
 static const char* kActionNameZh[] = {
 /* EX_UNKNOWN */ "未知动作",
-/* EX_AIDBC   */ "上斜交替哑铃弯举",
+/* EX_AIDBC   */ "哑铃弯举",
 /* ……         */ /* 你可以继续补全 */
-/* EX_DWC     */ "哑铃弯举",
+/* EX_DWC     */ "哑铃侧平举",
 /* EX_DLR     */ "哑铃划船",
 /* EX_DSP     */ "哑铃深蹲推举",
 /* EX_45DBP   */ "45°哑铃卧推",
@@ -99,7 +99,7 @@ public:
     // 页面管理
     virtual lv_obj_t* CreatePage(const std::string& id) override;
     virtual void ShowPage(const std::string& id) override;
-    virtual void UpdateExercise(const std::string& name, int count, float score) override;
+    virtual void UpdateExercise(const std::string& name, int count,int count1, float score) override;
     virtual void UpdatePause(int action_id, int target_reps, int seconds)override;   // ← 新接口
     virtual void StopPause()override;                                               // 可选：提前终止
     

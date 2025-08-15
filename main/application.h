@@ -72,7 +72,7 @@ enum Exercise {
     EX_AIDBC   = 2,
     EX_30DBP   = 3,
     EX_DWC     = 1,
-    EX_DLR     = 4,
+    EX_DLR     = 2,
     EX_45DBP   = 5,
     EX_DSP     = 6,
     EX_IDBC    = 7
@@ -128,11 +128,14 @@ public:
     void PlaySound(const std::string_view& sound);
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    void SendMcpEncourage(int setOrder, int repIndex, int totalReps, int exercise);
     // 统一设态 + 三个便捷封装
     void SendMcpStateSet(const char* mode);
     void NotifyTrainingStarted();
     void NotifyRestEntered();
     void NotifyTrainingExited();
+
+    void OnRepLabel(int ex_label);
 
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
