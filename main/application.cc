@@ -2484,32 +2484,55 @@ void Application::score_poll_task(void*){
     }
 }
 
-extern "C" void on_rep_scored_from_server(int rep, int rep_cnt,float score, int label_id, const char* label_name) {
-    RepReport rp1;
-    rp1.ex       = rep_report.ex;  // 当前的锻炼编号
-    rp1.rep_idx  = rep_cnt;        // 最近一次完成的编号
-    rp1.score    = score;          // 服务器返回分
-    rep_report.score   = score;
+extern "C" void on_rep_scored_from_server(
+    int rep,                  // 服务器回传的该次动作序号（不参与逻辑）
+    int srv_rep_cnt,          // 服务器回传的“已完成次数”（可能与本地不完全一致）
+    float score,
+    int label_id,
+    const char* label_name
+) {
+    // 1) 先把分数落到当前组（避免最后一次分数丢失）
+    {
+        std::lock_guard<std::mutex> lk(g_record_mtx);
+        if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
+            g_record_items[g_cur_idx].scores.push_back(score);
+        }
+    }
+
+    // 2) 刷 UI / 发给 App —— 使用本机全局计数 ::rep_cnt 的快照
+    rep_report.score = score;
     ex_label = label_id;
+
+    RepReport rp1;
+    rp1.ex      = rep_report.ex;
+    rp1.rep_idx = ::rep_cnt;          // <<< 用设备端全局计数，而不是 srv_rep_cnt
+    rp1.score   = score;
     send_rep_json(rp1);
-    if (rep_cnt==rep_report.rep_idx){  // 确保 rep_cnt 是最新的
-    rep_cnt = 0;
-    is_rep_counting = false;  // 重置计数状态
-    EnterRest();
+
+    auto display = Board::GetInstance().GetDisplay();
+    const char* zh = ActionName(rep_report.ex);
+    display->UpdateExercise(zh, ::rep_cnt, rep_report.rep_idx, rep_report.score);
+    display->ShowPage("workout");
+
+    // 3) 只用设备端的全局计数来判断“本组完成”
+    if (::rep_cnt >= rep_report.rep_idx) {
+        // 进入休息/结束之前，先把本组的实际次数回填到记录
+        {
+            std::lock_guard<std::mutex> lk(g_record_mtx);
+            if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
+                g_record_items[g_cur_idx].num = ::rep_cnt;
+            }
+        }
+        is_rep_counting = false;   // 休息前关计数防抖
+        EnterRest();               // 最后一组会在里面直接 FinishTraining()
+        return;
     }
-    else{
-    auto  display = Board::GetInstance().GetDisplay();
-    const char* zh = ActionName(rep_report.ex);          // 你的中文映射
-    display->UpdateExercise(zh, rep_cnt,rep_report.rep_idx, /*已完成次数*/rep_report.score);
-    display->ShowPage("workout");}
 
-
-    ESP_LOGI("FIT", "Score=%.2f label=%d(%s) rep=%d ex=%d",
-             score, label_id, (label_name?label_name:""), rep, rep_report.ex);
-
-    if (g_cur_idx >= 0 && g_cur_idx < (int)g_record_items.size()) {
-        g_record_items[g_cur_idx].scores.push_back(score);
-    }
+    // 4) 记录日志（带上本机与服务器的两个计数，方便排查偏差）
+    // ESP_LOGI("FIT",
+    //     "Score=%.2f label=%d(%s) srv_rep=%d srv_cnt=%d dev_cnt=%d target=%d",
+    //     score, label_id, (label_name?label_name:""),
+    //     rep, srv_rep_cnt, ::rep_cnt, rep_report.rep_idx);
 }
 
 
